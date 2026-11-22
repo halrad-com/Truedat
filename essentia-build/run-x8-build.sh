@@ -17,6 +17,15 @@
 #           the profile the shipped binary was built from. Counters only fit the
 #           sources and compiler they were recorded with: after a source change,
 #           or on another gcc, record a new profile instead.
+#       The build tree records which profile its optimized objects were compiled
+#       from (the MD5 of the counter archive, in <tree>/.x8-profile-md5). waf
+#       tracks sources and flags but not the counters, so a build handed a
+#       DIFFERENT profile than the tree was built from removes the whole tree
+#       first and compiles everything again; the same profile reuses it. A
+#       different <dest dir> alone changes nothing - it is only where the
+#       extractor is copied.
+#   X8_OUT=<name>   build in essentia-src/build/<name> instead of x8 (a plain
+#                   folder name; the profile rule above applies to it too)
 #
 # What it does, in one out dir (essentia-src/build/x8, with its own WAFLOCK, so
 # the plain `python3 waf` path that run-x6-build.sh uses is never reconfigured
@@ -61,7 +70,7 @@ ROOT="$(pwd)"
 LOG="$ROOT/${3:-build-x8.log}"
 fail() { echo "run-x8-build.sh: $1" | tee -a "$LOG"; echo "EXIT=${2:-4}" >> "$LOG"; exit "${2:-4}"; }
 : > "$LOG"
-[ -n "${1:-}" ] && [ -n "${2:-}" ] || fail "usage: run-x8-build.sh <dest dir> <training list> [<log file>]"
+[ -n "${1:-}" ] && [ -n "${2:-}" ] || fail "usage: run-x8-build.sh <dest dir> <training list | profile.tar.gz> [<log file>]"
 DEST="$1"
 LIST="$2"
 [ -f "$LIST" ] || fail "training list or profile archive not found: $LIST"
@@ -75,14 +84,20 @@ if [ -e "$EXE" ]; then
   [ "$tracked" -eq 1 ] || fail "$EXE is committed, or git could not say (exit $tracked) - refusing to overwrite it; build to a new dir"
 fi
 JOBS="${X8_JOBS:-8}"
-# X8_OUT names another out dir under essentia-src/build/ (default x8). A rebuild from
-# a recorded profile into the dir a previous run just used would find every object up
-# to date - waf does not know the counters changed - so a repeat build that is meant
-# to prove something goes into a fresh one.
-OUT="build/${X8_OUT:-x8}"
+# X8_OUT names another out dir under essentia-src/build/ (default x8). A bare folder
+# name only: a tree built from another profile is removed whole (below), so the name
+# must never reach outside essentia-src/build/.
+NAME="${X8_OUT:-x8}"
+case "$NAME" in *[!A-Za-z0-9._-]*|.|..) fail "X8_OUT must be a plain folder name under essentia-src/build/, not: $NAME" ;; esac
+OUT="build/$NAME"
 BUILD="$ROOT/essentia-src/$OUT"
 TRAIN="$BUILD-train"
 GCOV="$BUILD-gcov"
+# Which profile the optimized objects in the tree were compiled from. waf decides
+# "up to date" from sources and flags; the .gcda counters are neither, so a rebuild
+# from another profile into a tree a previous run used would find every object up to
+# date and link the previous profile's code. The stamp is what closes that gap.
+STAMP="$BUILD/.x8-profile-md5"
 export PKG_CONFIG_PATH="$ROOT/3rdparty/lib/pkgconfig"
 export WAFLOCK=".lock-waf-$(basename "$OUT")"
 echo "START $(date) dest=$DEST list=$LIST" >> "$LOG"
@@ -102,12 +117,23 @@ build() {   # build <step name> <compile flags> <link flags>
 
 if [ -n "$PROFILE_TAR" ]; then
 # ---- recorded profile given: no instrumented build, no training
+PROFILE_MD5="$(md5sum < "$PROFILE_TAR" | cut -d' ' -f1)"
+BUILT_FROM="$(cat "$STAMP" 2>/dev/null)"
+if [ -d "$BUILD" ] && [ "$BUILT_FROM" != "$PROFILE_MD5" ]; then
+  # missing stamp included: a tree whose profile is not known is not trusted
+  echo "build tree $OUT was built from profile ${BUILT_FROM:-(not recorded)}, not $PROFILE_MD5: removing it, every object is compiled again" >> "$LOG"
+  rm -rf "$BUILD" && [ ! -e "$BUILD" ] || fail "cannot remove the build tree $BUILD" 6
+elif [ -d "$BUILD" ]; then
+  echo "build tree $OUT was built from this profile: its objects are reused" >> "$LOG"
+fi
 mkdir -p "$BUILD"
 echo "stale counters removed: $(find "$BUILD" -name '*.gcda' -print -delete | wc -l)" >> "$LOG"
 tar -xzf "$PROFILE_TAR" -C "$BUILD" >> "$LOG" 2>&1 || { echo "cannot unpack $PROFILE_TAR" >> "$LOG"; echo "EXIT=6" >> "$LOG"; exit 6; }
-echo "profile: $(basename "$PROFILE_TAR") md5 $(md5sum < "$PROFILE_TAR" | cut -d' ' -f1); counters in the build tree: $(find "$BUILD" -name '*.gcda' | wc -l)" >> "$LOG"
+echo "$PROFILE_MD5" > "$STAMP"
+echo "profile: $(basename "$PROFILE_TAR") md5 $PROFILE_MD5; counters in the build tree: $(find "$BUILD" -name '*.gcda' | wc -l)" >> "$LOG"
 else
 # ---- 1. instrumented
+rm -f "$STAMP"   # the tree's objects are about to come from no recorded profile
 build instrumented "-fprofile-generate" "-fprofile-generate"
 INSTR="$BUILD/src/examples/essentia_streaming_extractor_music.exe"
 
@@ -163,7 +189,9 @@ echo "counters in the build tree: $(find "$BUILD" -name '*.gcda' | wc -l)" >> "$
 # so the same counters always make the same archive
 mkdir -p "$ROOT/$DEST"
 ( cd "$BUILD" && find . -name '*.gcda' | LC_ALL=C sort | tar --no-recursion --mtime='2000-01-01 00:00:00' --owner=0 --group=0 --numeric-owner -cf - -T - | gzip -n > "$ROOT/$DEST/profile-gcda.tar.gz" ) >> "$LOG" 2>&1
-echo "profile kept: $DEST/profile-gcda.tar.gz md5 $(md5sum < "$ROOT/$DEST/profile-gcda.tar.gz" | cut -d' ' -f1)" >> "$LOG"
+PROFILE_MD5="$(md5sum < "$ROOT/$DEST/profile-gcda.tar.gz" | cut -d' ' -f1)"
+echo "$PROFILE_MD5" > "$STAMP"   # the optimized build below compiles from this profile
+echo "profile kept: $DEST/profile-gcda.tar.gz md5 $PROFILE_MD5" >> "$LOG"
 fi
 
 # ---- 3. optimized

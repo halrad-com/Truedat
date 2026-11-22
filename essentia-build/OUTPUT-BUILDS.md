@@ -516,7 +516,10 @@ GCC 13 (`x86_64-w64-mingw32`, win32 threads). The audio is local and not in the 
 `0ed581062ebf9f4f3fa10c91ca3022af`), the profile this binary was built from.
 `run-x8-build.sh <dest> output-x64.8/profile-gcda.tar.gz` rebuilds the optimized step from
 it with no audio. Counters fit only these sources and this compiler — after a source change,
-record a new profile.
+record a new profile. waf does not track the counters, so the build tree records which
+profile its objects were compiled from, and a build handed a different profile removes the
+tree and compiles everything again (before 2026-11-22 it reused the previous profile's
+objects unless the build was pointed at a fresh out dir).
 
 **Verification** (three whole-corpus passes of every binary, the order rotated each round,
 scan + edges call shape; the extractor does not repeat exactly on most real music — a few
