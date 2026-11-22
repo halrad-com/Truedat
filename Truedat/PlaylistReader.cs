@@ -32,20 +32,33 @@ namespace Truedat
             && (path.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase)
                 || path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase));
 
-        /// <summary>Probe the convention locations, first hit wins:
-        /// <c>&lt;dir&gt;\mbxmoods-exclude.m3u8</c>, <c>.m3u</c>, then the same pair
-        /// under <c>&lt;dir&gt;\Playlists\</c> (MusicBee's playlist folder).
+        /// <summary>MusicBee's playlist folder under the library folder.</summary>
+        public const string PlaylistsFolder = "Playlists";
+
+        /// <summary>Every convention location, in the order the scan tries them: <c>&lt;dir&gt;\mbxmoods-exclude.m3u8</c>, <c>.m3u</c>,
+        /// then the same pair under <c>&lt;dir&gt;\Playlists\</c>. One list for the scan's discovery and for what <c>--reset</c> takes,
+        /// so the two cannot disagree about where the playlist is (review #10).</summary>
+        public static IEnumerable<string> Candidates(string baseDir)
+        {
+            foreach (var ext in Extensions) yield return Path.Combine(baseDir, ConventionName + ext);
+            foreach (var c in FolderCandidates(baseDir)) yield return c;
+        }
+
+        /// <summary>The candidates in the Playlists folder only (the ones beside the library are named <c>mbxmoods-exclude*</c> and
+        /// already count among the operator's files there).</summary>
+        public static IEnumerable<string> FolderCandidates(string baseDir)
+        {
+            foreach (var ext in Extensions) yield return Path.Combine(baseDir, PlaylistsFolder, ConventionName + ext);
+        }
+
+        static readonly string[] Extensions = { ".m3u8", ".m3u" };
+
+        /// <summary>Probe the convention locations (<see cref="Candidates"/>), first hit wins.
         /// Null when none exists — a legitimate "nothing excluded via playlist".</summary>
         public static string? Discover(string baseDir)
         {
-            foreach (var dir in new[] { baseDir, Path.Combine(baseDir, "Playlists") })
-            {
-                foreach (var ext in new[] { ".m3u8", ".m3u" })
-                {
-                    var candidate = Path.Combine(dir, ConventionName + ext);
-                    if (File.Exists(candidate)) return candidate;
-                }
-            }
+            foreach (var candidate in Candidates(baseDir))
+                if (File.Exists(candidate)) return candidate;
             return null;
         }
 

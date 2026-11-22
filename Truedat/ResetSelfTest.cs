@@ -33,7 +33,53 @@ namespace Truedat
             TestIgnoreCarried(assert);
             TestRuleRestore(assert);
             TestRestoreArchiveShapes(assert);
+            TestPlaylistInPlaylistsFolder(assert);
             TestCli(assert);
+        }
+
+        /// <summary>Review #10: the scan finds the exclusion playlist beside the library OR in its Playlists folder (PlaylistReader.Discover),
+        /// and the reset looked only beside the library — so after a "full" reset the playlist in Playlists\ still excluded tracks from
+        /// the rebuild. The reset takes every place the scan looks, under its relative name, and a restore puts it back there.</summary>
+        static void TestPlaylistInPlaylistsFolder(Action<bool, string> assert)
+        {
+            var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "reset-playlist-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            try
+            {
+                var lib = Path.Combine(root, "Library");
+                var playlists = Path.Combine(lib, "Playlists");
+                Directory.CreateDirectory(playlists);
+                var catalog = Path.Combine(lib, Program.MoodsFileName);
+                File.WriteAllText(catalog, "{\"tracks\":{}}");
+                var inFolder = Path.Combine(playlists, PlaylistReader.ConventionName + ".m3u8");
+                var inFolderM3u = Path.Combine(playlists, PlaylistReader.ConventionName + ".m3u");
+                File.WriteAllText(inFolder, "D:\\Music\\excluded.flac\r\n");
+                File.WriteAllText(inFolderM3u, "D:\\Music\\also.flac\r\n");
+                File.WriteAllText(Path.Combine(playlists, "Road Trip.m3u8"), "D:\\Music\\a.flac\r\n");   // the operator's other playlists are not ours
+
+                var reset = ResetCommand.Collect(ResetCommand.Verb.Reset, catalog, null, null);
+                var names = reset.Select(f => f.EntryName).ToList();
+                assert(names.Contains("Playlists/" + PlaylistReader.ConventionName + ".m3u8") && names.Contains("Playlists/" + PlaylistReader.ConventionName + ".m3u"),
+                    $"reset-playlist #10: --reset takes the exclusion playlist from the Playlists folder too, under its relative name ({string.Join(", ", names)})");
+                assert(!names.Any(n => n.IndexOf("Road Trip", StringComparison.OrdinalIgnoreCase) >= 0), "reset-playlist #10: and no other playlist");
+                var clear = ResetCommand.Collect(ResetCommand.Verb.Clear, catalog, null, null).Select(f => f.EntryName).ToList();
+                assert(!clear.Any(n => n.StartsWith("Playlists/", StringComparison.Ordinal)), "reset-playlist #10: --clear keeps it, as it keeps the other rule files");
+
+                var zip = Path.Combine(root, "mbxmoods-reset-20261122-000000.zip");
+                ResetCommand.Execute(reset, zip);
+                assert(!File.Exists(inFolder) && !File.Exists(inFolderM3u) && File.Exists(Path.Combine(playlists, "Road Trip.m3u8")),
+                    "reset-playlist #10: after the reset the exclusion playlists are gone from Playlists\\ (and the other playlist is not)");
+                assert(PlaylistReader.Discover(lib) == null, "reset-playlist #10: so the scan after the reset finds no exclusion playlist");
+
+                var rules = ResetCommand.RuleEntries(zip);
+                assert(rules.Contains("Playlists/" + PlaylistReader.ConventionName + ".m3u8"),
+                    $"reset-playlist #10: a restore of that archive counts the playlist among the operator's files ({string.Join(", ", rules)})");
+                Directory.Delete(playlists, true);   // the folder itself may be gone by then too
+                ResetCommand.RestoreRules(zip, rules, lib);
+                assert(File.Exists(inFolder) && File.ReadAllText(inFolder) == "D:\\Music\\excluded.flac\r\n" && File.Exists(inFolderM3u),
+                    "reset-playlist #10: and puts it back where it was, in Playlists\\, byte for byte");
+            }
+            catch (Exception ex) { assert(false, "reset-playlist #10: threw " + ex.GetType().Name + ": " + ex.Message); }
+            finally { try { Directory.Delete(root, true); } catch { } }
         }
 
         /// <summary>--restore of archives whose shape is not "a catalog and maybe its rules", in child processes (a restore needs no

@@ -178,6 +178,16 @@ namespace Truedat
                         Add(f, name);
                 }
 
+            // The exclusion playlist in the library's Playlists folder (review #10): the scan finds it there as well as beside the library
+            // (PlaylistReader), so a reset that left it would rebuild with the rules it was asked to remove. Every name the scan would
+            // try, not only the first: with that one gone the next would take its place. Under its relative name, so a restore puts it
+            // back where it was. --clear keeps it, as it keeps the other rule files.
+            foreach (var p in PlaylistReader.FolderCandidates(dir))
+            {
+                var name = Path.GetFileName(p);
+                if (File.Exists(p) && !Keeps(verb, name)) Add(p, PlaylistReader.PlaylistsFolder + "/" + name);
+            }
+
             // The work folder (WorkFolder): the working files truedat wrote for this library — the same classifier, narrowed to
             // what IS a working file, because the work folder can be the exe's own folder, where the exe, the config file and the
             // field registry sit. Entries under work/, after the catalog folder's, so a name held in both folders never collides
@@ -327,7 +337,7 @@ namespace Truedat
                 using var zip = ZipFile.OpenRead(archivePath);
                 if (zip.GetEntry(CatalogArchive.ManifestEntryName) != null) return names;
                 foreach (var e in zip.Entries)
-                    if (IsLeafName(e.FullName) && IsOperatorFile(e.FullName)) names.Add(e.FullName);
+                    if ((IsLeafName(e.FullName) && IsOperatorFile(e.FullName)) || IsPlaylistsEntry(e.FullName)) names.Add(e.FullName);
             }
             catch (Exception) { /* not a zip, or unreadable: the restore's own read reports it */ }
             return names;
@@ -367,10 +377,26 @@ namespace Truedat
             return bad;
         }
 
-        /// <summary>Where a rule entry goes: <paramref name="catalogDir"/>\<paramref name="name"/>, and nowhere else — a name that is not a
-        /// leaf, or whose full path's folder is not the catalog folder, throws <see cref="InvalidDataException"/>.</summary>
+        /// <summary><c>Playlists/&lt;the exclusion playlist&gt;</c>: the one rule file that lives in a folder of its own (review #10).</summary>
+        internal static bool IsPlaylistsEntry(string name)
+        {
+            var slash = name.IndexOf('/');
+            if (slash <= 0 || !string.Equals(name.Substring(0, slash), PlaylistReader.PlaylistsFolder, StringComparison.OrdinalIgnoreCase)) return false;
+            var leaf = name.Substring(slash + 1);
+            return IsLeafName(leaf) && PlaylistReader.IsPlaylistPath(leaf)
+                && leaf.StartsWith(PlaylistReader.ConventionName + ".", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>Where a rule entry goes: <paramref name="catalogDir"/>\<paramref name="name"/> (or its Playlists folder for a
+        /// <see cref="IsPlaylistsEntry"/>), and nowhere else — a name that is not a leaf, or whose full path's folder is not that folder,
+        /// throws <see cref="InvalidDataException"/>.</summary>
         static string RuleDestination(string catalogDir, string name)
         {
+            if (IsPlaylistsEntry(name))
+            {
+                var folder = Path.GetFullPath(Path.Combine(catalogDir, PlaylistReader.PlaylistsFolder));
+                return RuleDestination(folder, name.Substring(name.IndexOf('/') + 1));
+            }
             if (!IsLeafName(name)) throw new InvalidDataException($"{name} is not a plain file name; a rule file is only ever put back beside the catalog");
             var dir = Path.GetFullPath(catalogDir);
             var dest = Path.GetFullPath(Path.Combine(dir, name));
@@ -399,6 +425,7 @@ namespace Truedat
                 var name = names[i];
                 var e = zip.GetEntry(name) ?? throw new IOException($"{name} is not in {archivePath}");
                 var dest = dests[i];
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);   // a Playlists folder removed since the archive was made
                 var tmp = dest + ".restore.tmp";
                 try { File.Delete(tmp); } catch { }
                 using (var src = e.Open())
