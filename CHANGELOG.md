@@ -6,6 +6,12 @@ validation), `PV` (public validation), `RC` (release candidate). There is no fin
 release state: a version is a snapshot along the arc, never promoted to a bare
 `vX.Y.Z`.
 
+## [0.5.5.4-EV6.2.2] — 2026-11-22
+
+### Changed
+
+- Revert log move.
+
 ## [0.5.5.4-EV6.2] — 2026-11-21
 
 ### Changed
@@ -23,7 +29,6 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 - Identical files are not scanned twice: the same audio at two paths is analyzed once, in a library, list or folder scan. A copy met while its twin is being analyzed waits for that analysis and reuses it; each copy keeps its own title, artist and album.
 - .8 build of Essentia using PGO+LTO optimization average about 2% less extractor time.
 - The scan summary says how many tracks were held in memory, and how many reused an identical track's analysis.
-- The clutter is relocated to the location of the exe: truedat's working files (the error and skipped lists, scan summaries, logs, backups and archives) are written to the folder with the exe instead of the catalog folder. Files already beside the catalog are moved on the first scan. The catalog, sidecar, edges file, store and your rules stay where they are. `--work-dir` names another folder.
 - `--clear` starts a library's analysis over and keeps how it is set up: it archives and removes truedat's analysis data (the catalog, sidecar, edges file, store, and the error and skipped lists), then scans from nothing. It keeps your settings, exclusion rules, duplicate verdicts and the files you marked ignore. It asks you to type `CLEAR`.
 - `--reset` is now a full reset: it does what `--clear` does and also archives and removes your exclusion rules, duplicate verdicts and ignore decisions. Before this it kept the exclusion rules. `--restore` of its archive puts them back.
 
