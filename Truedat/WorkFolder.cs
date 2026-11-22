@@ -127,6 +127,9 @@ namespace Truedat
             note = null;
             var cat = Norm(catalogDir);
             var want = Resolve(cat);
+            // The catalog folder under another name (a junction to it, a subst drive): it IS the catalog folder, and is settled as that,
+            // so nothing is moved into itself (review #14).
+            if (!Same(want, cat) && SameEntry(want, cat)) want = cat;
             if (!Same(want, cat) && !Ensure(want))
             {
                 note = $"Work folder: {want} cannot be written — truedat's working files stay beside the catalog in {cat}";
@@ -349,6 +352,7 @@ namespace Truedat
             var work = For(cat);
             report.Folder = work;
             if (Same(work, cat) || !Directory.Exists(cat)) return report;
+            if (SameEntry(work, cat)) return report;   // the same folder by another name: nothing to move (review #14)
 
             string catalogName = Path.GetFileName(catalogPath);
             string sidecarName = Path.GetFileName(Path.ChangeExtension(catalogPath, ".mbxs"));
@@ -376,6 +380,7 @@ namespace Truedat
                 var dest = Path.Combine(work, name);
                 try
                 {
+                    if (File.Exists(dest) && SameEntry(src, dest)) continue;   // one file reached by two names: not a collision (review #14)
                     if (File.Exists(dest))
                     {
                         // Both folders hold this name. The newer one is the live file; the other keeps its content under a
@@ -531,5 +536,48 @@ namespace Truedat
         }
 
         static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+        // ---- identity (review #14) --------------------------------------------------------------------------
+
+        /// <summary>The same folder or file, whatever it is called: equal names, or the same volume serial and file index (a junction,
+        /// a subst drive, a mapped name and its target). Strings alone took a junction and its target for two folders, so the move
+        /// collided every working file with itself and renamed the only copy aside.</summary>
+        internal static bool SameEntry(string a, string b)
+        {
+            if (Same(Norm(a), Norm(b))) return true;
+            return TryIdentity(a, out var x) && TryIdentity(b, out var y) && x.Volume == y.Volume && x.Index == y.Index;
+        }
+
+        /// <summary>Volume serial number and file index of a file or folder (the target's, through a junction). False when it cannot be
+        /// opened — it does not exist, or the volume does not report one — and the caller then has only the name to go on.</summary>
+        internal static bool TryIdentity(string path, out (uint Volume, ulong Index) id)
+        {
+            id = default;
+            try
+            {
+                using var h = CreateFileW(Path.GetFullPath(path), 0, 0x7 /* share read, write, delete */, IntPtr.Zero, 3 /* OPEN_EXISTING */,
+                                          0x02000000 /* FILE_FLAG_BACKUP_SEMANTICS: folders open too */, IntPtr.Zero);
+                if (h.IsInvalid) return false;
+                if (!GetFileInformationByHandle(h, out var info)) return false;
+                if (info.VolumeSerialNumber == 0 && info.FileIndexHigh == 0 && info.FileIndexLow == 0) return false;   // nothing to compare
+                id = (info.VolumeSerialNumber, ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow);
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle, out ByHandleFileInformation info);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;
+            public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
+        }
     }
 }

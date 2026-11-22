@@ -51,6 +51,7 @@ namespace Truedat
                 DriveRoots(assert, Path.Combine(root, "roots"));
                 CustomCatalog(assert, Path.Combine(root, "custom"));
                 CrossVolumeRace(assert, Path.Combine(root, "race"));
+                Alias(assert, Path.Combine(root, "alias"));
                 Settings(assert);
             }
             catch (Exception ex) { assert(false, $"work folder: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -639,6 +640,48 @@ namespace Truedat
             moved = moveOne != null && (bool)moveOne.Invoke(null, new object[] { src, destOtherRoot })!;
             assert(moved && !File.Exists(src) && File.ReadAllText(dest) == "this run's ledger"
                    && Directory.GetFiles(destDir).Length == 1, $"work race: with nothing in the way the copy lands, verified, and the source goes (moved {moved})");
+        }
+
+        /// <summary>A work folder that is the catalog folder under another name — a junction to it (review #14). The names differ, so
+        /// the move took them for two folders: every working file "collided" with itself, the timestamps tied, and the only copy of
+        /// the ledger was renamed to .moved-&lt;time&gt;. Folders are compared by directory identity (volume serial + file index) now.
+        /// The junction is made inside this test's own folder and removed by the test (never left for a recursive delete).</summary>
+        static void Alias(Action<bool, string> assert, string root)
+        {
+            var lib = Path.Combine(root, "Library");
+            var junction = Path.Combine(root, "LibraryAlias");
+            Directory.CreateDirectory(lib);
+            var catalog = Path.Combine(lib, "mbxmoods.json");
+            File.WriteAllText(catalog, "{}");
+            var ledger = Path.Combine(lib, "mbxmoods-errors.csv");
+            File.WriteAllText(ledger, "the only copy");
+            int mk;
+            using (var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c mklink /J \"" + junction + "\" \"" + lib + "\"")
+                   { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!)
+            { p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd(); p.WaitForExit(); mk = p.ExitCode; }
+            if (mk != 0 || !File.Exists(Path.Combine(junction, "mbxmoods-errors.csv")))
+            {
+                Console.WriteLine("  NOT RUN  work alias: could not make a junction here (mklink /J exit " + mk + ")");
+                return;
+            }
+            try
+            {
+                WorkFolder.Configure(junction, Path.Combine(root, "Tools"));
+                var set = ResetCommand.Collect(ResetCommand.Verb.Reset, catalog, null, null).Select(f => f.EntryName).ToList();
+                assert(!set.Any(n => n.StartsWith("work/", StringComparison.Ordinal)) && set.Count(n => n == "mbxmoods-errors.csv") == 1,
+                    $"work alias: the reset's file set lists each file once, not again through the alias ({string.Join(", ", set)})");
+                WorkFolder.Begin(lib, out _);
+                var r = WorkFolder.MoveExisting(catalog, null);
+                assert(File.Exists(ledger) && File.ReadAllText(ledger) == "the only copy",
+                    "work alias: the ledger is still at its name, untouched, when the work folder is the catalog folder by another name");
+                var aside = Directory.GetFiles(lib, "*" + WorkFolder.MovedSuffix + "*");
+                assert(aside.Length == 0 && r.Moved == 0 && r.Renamed.Count == 0,
+                    $"work alias: an alias-to-itself move moves nothing and renames nothing ({r.Moved} moved, {r.Renamed.Count} renamed, {aside.Length} .moved- files)");
+                assert(WorkFolder.Describe(r) == null, "work alias: and has nothing to say");
+                WorkFolder.Configure(null, AppDomain.CurrentDomain.BaseDirectory);
+            }
+            finally { try { Directory.Delete(junction); } catch { } }   // non-recursive: removes the link, never the folder it points at
+            assert(!Directory.Exists(junction) && File.Exists(ledger), "work alias: the test's junction is removed and the folder it pointed at is intact");
         }
 
         /// <summary>The flag and the config key are one spelling, and a reset may ride with it.</summary>

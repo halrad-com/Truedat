@@ -193,7 +193,8 @@ namespace Truedat
             // field registry sit. Entries under work/, after the catalog folder's, so a name held in both folders never collides
             // and the store a restore looks for (truedat.db) is the catalog folder's.
             var workDir = WorkFolder.For(dir);
-            if (!string.Equals(Path.GetFullPath(workDir).TrimEnd('\\'), Path.GetFullPath(dir).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) && Directory.Exists(workDir))
+            // By identity, not by name (review #14): a work folder that is the catalog folder through a junction would list every file twice.
+            if (!WorkFolder.SameEntry(workDir, dir) && Directory.Exists(workDir))
                 foreach (var f in Directory.GetFiles(workDir).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
                 {
                     var name = Path.GetFileName(f);
