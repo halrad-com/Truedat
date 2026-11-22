@@ -7345,6 +7345,8 @@ namespace Truedat
                 // the extractors share; with an extractor that holds nothing in memory there is nothing to make room for.
                 if (msLikelyWork.Count > 0)
                 {
+                    var knownLengths = msLikelyWork.Where(t => t.TotalTimeMs > 0).Select(t => t.TotalTimeMs / 1000.0).ToList();
+                    if (knownLengths.Count > 0) _typicalTrackSeconds = knownLengths.Average();   // before the budget is first made, just below
                     long orderBudget = essentiaExe != null && SpoolCapable(essentiaExe) ? _spoolBudget.Value.TotalBytes : 0;
                     // Two passes, so the same audio is not analyzed twice: a track the same exact length as one before it waits
                     // until the first pass is done, then is checked against what that pass analyzed (ScanOrder).
@@ -11939,6 +11941,10 @@ namespace Truedat
         /// <summary>How many extractors this run starts at once — set by the scan modes beside their Parallel.ForEach; 1 until then.</summary>
         internal static int _extractorWorkers = 1;
 
+        /// <summary>The length of an ordinary track in this run, for the room the RAM budget leaves the workers that have not
+        /// started yet: the mean length of the library scan's work list when the library gives lengths, else four and a half minutes.</summary>
+        internal static double _typicalTrackSeconds = 270;
+
         /// <summary>The RAM the run's extractors share for decoded audio (<see cref="SpoolBudget"/>), sized from the RAM AVAILABLE when
         /// the first track is analyzed — not the installed total: a RAM drive or a busy machine shrinks it. Read once and said once, to
         /// stderr, so <c>--json-output</c>'s stdout stays one JSON document. It has to work at 8 GB: the budget is a share of what is
@@ -11946,7 +11952,7 @@ namespace Truedat
         static readonly Lazy<SpoolBudget> _spoolBudget = new Lazy<SpoolBudget>(() =>
         {
             long avail = AvailablePhysicalBytes();
-            var budget = new SpoolBudget(avail);
+            var budget = new SpoolBudget(avail, _extractorWorkers, _typicalTrackSeconds);
             Console.Error.WriteLine($"  Spool:      {budget.TotalBytes / 1073741824.0:F1} GB of RAM shared by the tracks being analyzed (shared decode; {avail / 1073741824.0:F1} GB available, {_extractorWorkers} workers)");
             return budget;
         });

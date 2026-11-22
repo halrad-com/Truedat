@@ -15,10 +15,14 @@ namespace Truedat
         internal const double Share = 0.6;
         /// <summary>The extractor's own memory for a track: a base plus a cost per second of audio (measured on the current build).</summary>
         internal const double BaseMiB = 109.1, ExtractorMiBPerSec = 0.0656;
-        /// <summary>Room asked for beyond the audio itself: the spool allocates in 4 MiB blocks and keeps a size per packet, and a
-        /// track that runs out of room part-way has recorded for nothing. Kept small on purpose: a wide margin on every track is room
-        /// the smallest machine does not have.</summary>
-        internal const double SpoolMargin = 1.02;
+        /// <summary>The extractor decides for itself whether a track fits the room it was given: it refuses when the track's length
+        /// times the bytes a second decodes to, PLUS 5%, is over the cap (audioloader.cpp, startRecording). A grant smaller than that
+        /// is a track counted here as held in memory that the extractor then decodes once per pass. This is that factor; the two must
+        /// stay equal.</summary>
+        internal const double ExtractorCheckFactor = 1.05;
+        /// <summary>The length read from a file's header can be a little shorter than the one the extractor reads from the stream.</summary>
+        internal const double LengthTolerance = 1.02;
+        /// <summary>The spool allocates in 4 MiB blocks and keeps a size per packet.</summary>
         internal const long SpoolSlackBytes = 8L << 20;
         const double MiB = 1048576.0;
 
@@ -26,7 +30,18 @@ namespace Truedat
         readonly long _total;
         long _reserved;
 
-        internal SpoolBudget(long availableRamBytes) { _total = availableRamBytes > 0 ? (long)(Share * availableRamBytes) : 0; }
+        /// <param name="workers">How many extractors the run starts at once.</param>
+        /// <param name="typicalSeconds">The length of an ordinary track in this run: what a worker that has not started yet is
+        /// expected to analyze next.</param>
+        internal SpoolBudget(long availableRamBytes, int workers = 1, double typicalSeconds = 270)
+        {
+            _total = availableRamBytes > 0 ? (long)(Share * availableRamBytes) : 0;
+            _workers = Math.Max(1, workers);
+            _typicalExtractorBytes = ExtractorBytesFor(typicalSeconds > 0 ? typicalSeconds : 270);
+        }
+        readonly int _workers;
+        readonly long _typicalExtractorBytes;
+        int _running;
 
         internal long TotalBytes => _total;
         internal long ReservedBytes { get { lock (_gate) return _reserved; } }
@@ -65,27 +80,31 @@ namespace Truedat
         /// <summary>The room a track's decoded audio needs: its length times the bytes a second of it decodes to, plus the margin.
         /// Zero when either is unknown — a track of unknown length is not held in memory.</summary>
         internal static long SpoolBytesFor(double durationSec, long pcmBytesPerSec)
-            => durationSec > 0 && pcmBytesPerSec > 0 ? (long)(durationSec * pcmBytesPerSec * SpoolMargin) + SpoolSlackBytes : 0;
+            => durationSec > 0 && pcmBytesPerSec > 0 ? (long)(durationSec * pcmBytesPerSec * ExtractorCheckFactor * LengthTolerance) + SpoolSlackBytes : 0;
 
         /// <summary>Takes this track's room out of the budget. The extractor's own memory is always counted, because the extractor
         /// runs whatever is decided here; the room for the decoded audio is granted whole or not at all, since part of a track held in
-        /// memory saves nothing.</summary>
+        /// memory saves nothing. And it is granted only if room is left for the extractors of the workers that have not started a
+        /// track yet: they will run too, and without that an early track takes the room and the later extractors push what is in use
+        /// over the budget.</summary>
         internal Grant Reserve(double durationSec, long pcmBytesPerSec)
         {
             long ext = ExtractorBytesFor(durationSec);
             long want = _total > 0 ? SpoolBytesFor(durationSec, pcmBytesPerSec) : 0;
             lock (_gate)
             {
-                long spool = want > 0 && _reserved + ext + want <= _total ? want : 0;
+                long othersToCome = (long)Math.Max(0, _workers - _running - 1) * _typicalExtractorBytes;
+                long spool = want > 0 && _reserved + ext + want + othersToCome <= _total ? want : 0;
                 if (spool > 0) _held++; else if (want > 0) _refused++; else _unknown++;
                 _reserved += ext + spool;
+                _running++;
                 return new Grant { ExtractorBytes = ext, SpoolBytes = spool };
             }
         }
 
         internal void Release(Grant g)
         {
-            lock (_gate) _reserved -= g.ExtractorBytes + g.SpoolBytes;
+            lock (_gate) { _reserved -= g.ExtractorBytes + g.SpoolBytes; if (_running > 0) _running--; }
         }
     }
 }

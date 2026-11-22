@@ -91,6 +91,36 @@ namespace Truedat
                 "spool budget: a track whose length or format is unknown is not held in memory");
             assert(new SpoolBudget(0).Reserve(300, Cd).SpoolBytes == 0 && new SpoolBudget(-1).TotalBytes == 0,
                 "spool budget: with no reading of free RAM nothing is held in memory");
+
+            // Review #7: the extractor refuses to hold a track when its OWN estimate - length x rate x channels x 4 bytes, plus 5%
+            // (audioloader.cpp, startRecording) - is over the cap it was handed. A grant smaller than that is counted here as a track
+            // held in memory while the extractor decodes it once per pass. The grant must cover the extractor's estimate, for a
+            // length read from the file's header that may be a little shorter than the one the extractor reads.
+            foreach (var secs in new double[] { 30, 300, 794, 840, 1800, 3600, 4 * 3600 })
+            {
+                var grant = new SpoolBudget(120 * GiB).Reserve(secs, Cd);
+                double extractorWants = secs * 1.01 * Cd * 1.05;
+                assert(grant.SpoolBytes >= extractorWants,
+                    $"spool budget: the grant covers the extractor's own check at {secs:F0} s, with the length up to 1% longer than the header said ({grant.SpoolBytes:N0} >= {extractorWants:N0})");
+            }
+            assert(new SpoolBudget(120 * GiB).Reserve(840, Cd).SpoolBytes >= 311169600,
+                "spool budget: the review's 14-minute 44.1 kHz stereo track gets at least the 311,169,600 bytes the extractor asked for");
+
+            // Review #12: every worker's extractor runs whether or not its track is held in memory, so a grant must leave room for the
+            // extractors of the workers that have not started yet. Without that, early tracks take the room and later extractors push
+            // what is reserved over the budget.
+            var twelve = new SpoolBudget(8 * GiB, workers: 20, typicalSeconds: 12 * 60);   // a library of 12-minute tracks
+            for (int i = 0; i < 20; i++) twelve.Reserve(12 * 60, Cd);
+            assert(twelve.ReservedBytes <= twelve.TotalBytes,
+                $"spool budget: 20 workers on 12-minute tracks in 8 GiB stay inside the budget ({twelve.ReservedBytes:N0} of {twelve.TotalBytes:N0})");
+            var mixed = new SpoolBudget(4 * GiB, workers: 16, typicalSeconds: 250);
+            mixed.Reserve(5500, Cd);
+            for (int i = 0; i < 15; i++) mixed.Reserve(240 + i, Cd);
+            assert(mixed.ReservedBytes <= mixed.TotalBytes,
+                $"spool budget: one 5,500-second track then fifteen ordinary ones on 16 workers in 4 GiB stay inside the budget ({mixed.ReservedBytes:N0} of {mixed.TotalBytes:N0})");
+            var alone = new SpoolBudget(4 * GiB, workers: 16, typicalSeconds: 250);
+            var aloneGrant = alone.Reserve(240, Cd);
+            assert(aloneGrant.SpoolBytes > 0, "spool budget: room left for the other workers does not stop an ordinary track being held");
         }
 
         static void Order(Action<bool, string> assert)
