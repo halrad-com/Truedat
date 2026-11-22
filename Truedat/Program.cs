@@ -26176,6 +26176,34 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             // 5. The file set.
             var files = ResetCommand.Collect(verb, moodsPath, store, ledgerPath);
+
+            // 5a. Review #3: the rule files this run names on its command line are resolved now, before anything is removed. One the
+            //     reset is about to take (--reset --exclusions <the library's own rule file>) cannot be both removed and scanned with:
+            //     the reset archived and removed it and the scan after it then required it, exited 1 and left the library without a
+            //     catalog. Refused, naming it. A named file that does not exist is refused here too, for the same reason.
+            if (!_noExclusions && !ValidateExplicitExclusionsPath(out var namedExclErr))
+            {
+                Console.Error.WriteLine($"Error: {namedExclErr}, and the scan after {verbFlag} would refuse to start without it. Nothing was changed.");
+                return 2;
+            }
+            if (_excludePlaylistPath != null && !File.Exists(_excludePlaylistPath))
+            {
+                Console.Error.WriteLine($"Error: --exclude-playlist path not found: {_excludePlaylistPath}, and the scan after {verbFlag} would refuse to start without it. Nothing was changed.");
+                return 2;
+            }
+            foreach (var (named, flag) in new[] { (_noExclusions ? null : _exclusionsPath, "--exclusions"), (_excludePlaylistPath, "--exclude-playlist") })
+            {
+                if (string.IsNullOrEmpty(named)) continue;
+                string full;
+                try { full = Path.GetFullPath(named!); } catch { continue; }
+                if (!files.Any(f => string.Equals(Path.GetFullPath(f.Path), full, StringComparison.OrdinalIgnoreCase))) continue;
+                Console.Error.WriteLine($"Error: {verbFlag} takes the rule file this run would scan with ({flag} {full}): it cannot both remove it and use it. Nothing was changed.");
+                Console.Error.WriteLine(clear
+                    ? $"  Run {verbFlag} without {flag}."
+                    : $"  Run {verbFlag} without {flag} to start over with no rules, or use --clear, which keeps your rule files and scans with them.");
+                return 2;
+            }
+
             if (files.Count == 0)
             {
                 Console.WriteLine("  Nothing to archive: this library has no truedat files yet. Scanning.");

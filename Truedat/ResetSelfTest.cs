@@ -796,6 +796,25 @@ namespace Truedat
                     Check(File.Exists(farRules), "reset-cli: and it is left alone");
                 }
 
+                // ---- review #3: --reset with --exclusions naming the library's OWN rule file. The reset would archive and remove
+                //      that file and the scan after it would then require it: catalog gone, exit 1. Refused before anything is removed.
+                {
+                    var ownRules = Path.Combine(lib, ExclusionStore.FileName);
+                    if (!File.Exists(ownRules)) File.WriteAllText(ownRules, rules[ExclusionStore.FileName]);
+                    if (!File.Exists(catalog)) File.WriteAllText(catalog, OldCatalog);
+                    var catBefore = File.ReadAllBytes(catalog);
+                    var rulesBefore = File.ReadAllBytes(ownRules);
+                    int archivesBefore = Archives(ResetCommand.ArchivePrefix);
+                    var own = RunChild(exe, lib, common + " --reset --imeanit --exclusions " + Q(ownRules), out int ownExit);
+                    File.WriteAllText(Path.Combine(root, "reset-own-rules.log"), own);
+                    Check(ownExit == 2 && File.Exists(catalog) && File.ReadAllBytes(catalog).SequenceEqual(catBefore),
+                        $"reset-cli #3: --reset --exclusions naming the library's own rule file is refused with exit 2 and the catalog is still there (exit {ownExit})");
+                    Check(File.Exists(ownRules) && File.ReadAllBytes(ownRules).SequenceEqual(rulesBefore) && Archives(ResetCommand.ArchivePrefix) == archivesBefore,
+                        "reset-cli #3: nothing was removed or archived - the rule file is where it was");
+                    var ownLine = own.Split('\n').FirstOrDefault(l => l.Contains("--exclusions") && l.Contains(ownRules)) ?? "";
+                    Check(ownLine.Contains("Nothing was changed"), $"reset-cli #3: the refusal names the --exclusions file and says nothing was changed ({ownLine.Trim()})");
+                }
+
                 if (analyzable)
                 {
                     Check(resetExit == 0 && clearedExit == 0, $"reset-cli: the clear, the reset and their scans exit 0 (got {clearedExit}, {resetExit})");
