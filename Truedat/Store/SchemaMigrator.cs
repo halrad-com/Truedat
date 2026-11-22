@@ -125,8 +125,11 @@ namespace Truedat.Store
         internal static string BackupBeside(SqliteDb db, string label)
         {
             var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
-            string backup = $"{db.Path}.bak.{label}.{stamp}";
-            for (int n = 2; File.Exists(backup); n++) backup = $"{db.Path}.bak.{label}.{stamp}-{n}";   // two in one second (self-tests) never collide
+            // A store beside the catalog of a library this run has settled backs up into that library's work folder; a store kept in
+            // its own folder backs up beside itself, as before (WorkFolder.BackupPath).
+            var name = Path.GetFileName(db.Path);
+            string backup = global::Truedat.WorkFolder.BackupPath(db.Path, $"{name}.bak.{label}.{stamp}");
+            for (int n = 2; File.Exists(backup); n++) backup = global::Truedat.WorkFolder.BackupPath(db.Path, $"{name}.bak.{label}.{stamp}-{n}");   // two in one second (self-tests) never collide
             db.Exec($"VACUUM INTO '{backup.Replace("'", "''")}';");
             return backup;
         }

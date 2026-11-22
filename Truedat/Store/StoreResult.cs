@@ -51,6 +51,9 @@ namespace Truedat.Store
         public bool NoStore;
         /// <summary>A list scan's account of the paths it was given; null for every other verb.</summary>
         public StoreResultList? List;
+        /// <summary>Where this run's working files are (<see cref="global::Truedat.WorkFolder"/>), read back by <see cref="StoreResult.TryRead"/>;
+        /// null when the record carries none.</summary>
+        public string? WorkFolder;
     }
 
     /// <summary>What became of the paths a list scan (<c>--file-list</c>) was given. Every listed path is in exactly one count,
@@ -469,6 +472,11 @@ namespace Truedat.Store
                     if (r.ExitCode.HasValue) w.WriteNumber("exitCode", r.ExitCode.Value); else w.WriteNull("exitCode");
                     w.WriteString("outcome", r.Outcome);
                     if (r.Reason == null) w.WriteNull("reason"); else w.WriteString("reason", r.Reason);
+                    // Hub contract (2026-11-21, additive): where this run's working files are — the hub's utility lists them from this,
+                    // never re-deriving the rule. The folder actually used (the catalog folder after a fallback); ABSENT — not empty,
+                    // not null — when the run settled none.
+                    var workFolder = global::Truedat.WorkFolder.Current;
+                    if (!string.IsNullOrEmpty(workFolder)) w.WriteString("workFolder", workFolder);
                     if (r.NoStore)
                     {
                         // No store in force: there is none to describe and nothing was published from one. Null, not empty objects —
@@ -582,6 +590,7 @@ namespace Truedat.Store
                 r.Verb = Str(root, "verb"); r.StartedUtc = Str(root, "startedUtc"); r.FinishedUtc = NullableStr(root, "finishedUtc"); r.WrittenUtc = Str(root, "writtenUtc");
                 r.ExitCode = root.TryGetProperty("exitCode", out var ec) && ec.ValueKind == JsonValueKind.Number ? ec.GetInt32() : (int?)null;
                 r.Outcome = Str(root, "outcome"); r.Reason = NullableStr(root, "reason");
+                r.WorkFolder = NullableStr(root, "workFolder");
                 if (root.TryGetProperty("store", out var s) && s.ValueKind == JsonValueKind.Object)
                     r.Store = new StoreResultStore
                     {

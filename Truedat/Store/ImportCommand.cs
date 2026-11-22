@@ -901,8 +901,13 @@ namespace Truedat.Store
         static void ImportLedgers(StoreDal dal, List<(string Path, long Id)> roots, bool mirror, string dir, string now, ImportReport r)
         {
             string Mtime(string f) => File.GetLastWriteTimeUtc(f).ToString("o");
+            // The ledgers are working files (WorkFolder): read where each one is, the work folder first. A store keys the rows it
+            // imported on the ledger's PATH, so a ledger that has since moved between the two folders is checked under both
+            // paths — otherwise the first import after the move would add every row a second time.
+            string? Moved(string path) => global::Truedat.WorkFolder.OtherPlace(dir, path);
 
-            var errorsCsv = Path.Combine(dir, "mbxmoods-errors.csv");
+            var errorsCsv = global::Truedat.WorkFolder.Read(dir, "mbxmoods-errors.csv");
+            var errorsElsewhere = Moved(errorsCsv);
             foreach (var row in LedgerImport.ReadErrors(errorsCsv))
             {
                 var e = EntityForPath(dal, roots, mirror, row.Path, errorsCsv, now, r);
@@ -910,17 +915,21 @@ namespace Truedat.Store
                 var started = Mtime(errorsCsv);
                 // Keyed on content, not the CSV's mtime: every scan rewrites the file (review #5).
                 if (dal.RunExistsContent("essentia", e, "failed", errorsCsv, row.Error, row.FailedComponents)) continue;
+                if (errorsElsewhere != null && dal.RunExistsContent("essentia", e, "failed", errorsElsewhere, row.Error, row.FailedComponents)) continue;
                 dal.InsertRun("essentia", "unknown", e, null, null, null, started, null, null, null, "failed", row.FailedComponents, null, row.Error, errorsCsv);
                 r.ErrorsRows++;
             }
 
-            var skippedCsv = Path.Combine(dir, "mbxmoods-skipped.csv");
+            var skippedCsv = global::Truedat.WorkFolder.Read(dir, "mbxmoods-skipped.csv");
+            var skippedElsewhere = Moved(skippedCsv);
             foreach (var row in LedgerImport.ReadSkipped(skippedCsv))
             {
                 var e = EntityForPath(dal, roots, mirror, row.Path, skippedCsv, now, r);
                 if (e == null) continue;
                 var started = row.Timestamp ?? Mtime(skippedCsv);
                 if (dal.RunExists("essentia", e, "skipped", skippedCsv, started)) continue;
+                // A row without its own timestamp is keyed on the file's time, which a move keeps (rename, or a copy that sets it).
+                if (skippedElsewhere != null && dal.RunExists("essentia", e, "skipped", skippedElsewhere, started)) continue;
                 dal.InsertRun("essentia", "unknown", e, null, null, null, started, null, null, null, "skipped", null, row.Reason, null, skippedCsv);
                 r.SkippedRows++;
             }
@@ -940,9 +949,10 @@ namespace Truedat.Store
                 }
             }
 
-            foreach (var csv in Directory.GetFiles(dir, "mbxmoods-verify*.csv"))
+            foreach (var csv in global::Truedat.WorkFolder.Files(dir, "mbxmoods-verify*.csv"))
             {
                 var checkedUtc = Mtime(csv);
+                var csvElsewhere = Moved(csv);
                 foreach (var row in LedgerImport.ReadVerify(csv))
                 {
                     long? loc = null;
@@ -950,16 +960,19 @@ namespace Truedat.Store
                     if (rf != null) { CanonicalPath.Split(rf.Value.Path, row.Path, out _, out var canon); loc = dal.FindLocation(rf.Value.Id, canon, out _); }
                     var src = csv + "#" + row.Path;
                     if (dal.CheckExists(loc, row.Status, src)) continue;
+                    if (csvElsewhere != null && dal.CheckExists(loc, row.Status, csvElsewhere + "#" + row.Path)) continue;
                     dal.InsertCheck(loc, null, "verify", row.Status, row.Detail, checkedUtc, src);
                     r.VerifyRows++;
                 }
             }
 
-            foreach (var receipt in Directory.GetFiles(dir, "*-verify*.receipt.json"))
+            foreach (var receipt in global::Truedat.WorkFolder.Files(dir, "*-verify*.receipt.json"))
             {
                 var started = Mtime(receipt);
                 var contentSha = FileSha256(receipt);   // the receipt's identity is its content, carried in tool_version (review #5)
                 if (dal.RunExistsBySourceVersion("verify", receipt, contentSha)) continue;
+                var receiptElsewhere = Moved(receipt);
+                if (receiptElsewhere != null && dal.RunExistsBySourceVersion("verify", receiptElsewhere, contentSha)) continue;
                 dal.InsertRun("verify", "1", null, null, null, null, started, null, null, contentSha, "ok", null, null, null, receipt);
                 r.ReceiptRows++;
             }
@@ -1053,7 +1066,9 @@ namespace Truedat.Store
             try { return global::Truedat.CatalogArchive.PinImported(catalog, sha); }
             catch (Exception ex) when (!(ex is CatalogPinException))
             {
-                var pin = $"{catalog}.imported.{sha.Substring(0, Math.Min(16, sha.Length))}.zip";
+                // Named where PinImported writes it: the library's work folder (named, not created, here).
+                var pin = Path.Combine(global::Truedat.WorkFolder.For(Path.GetDirectoryName(Path.GetFullPath(catalog)) ?? "."),
+                    $"{Path.GetFileName(catalog)}.imported.{sha.Substring(0, Math.Min(16, sha.Length))}.zip");
                 throw new CatalogPinException($"the catalog could not be kept as {pin} before import ({ex.Message.Trim()}); nothing was imported", ex);
             }
         }

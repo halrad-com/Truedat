@@ -126,7 +126,7 @@ namespace Truedat
         {
             var start = new ProcessStartInfo
             {
-                FileName = exe, WorkingDirectory = cwd, Arguments = args, UseShellExecute = false, CreateNoWindow = true,
+                FileName = exe, WorkingDirectory = cwd, Arguments = WorkFolderSelfTest.ChildArgs(exe, cwd, args), UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
             };
             using var child = Process.Start(start) ?? throw new InvalidOperationException("could not start the child");

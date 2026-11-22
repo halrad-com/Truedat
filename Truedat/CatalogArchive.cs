@@ -288,7 +288,14 @@ namespace Truedat
             if (string.IsNullOrEmpty(sha256)) return null;
             var files = CatalogFiles(catalogPath);
             if (files.Count == 0) return null;
-            var stem = $"{catalogPath}.imported.{sha256.Substring(0, Math.Min(16, sha256.Length))}";
+            // A working file: in the library's work folder (WorkFolder). A pin of the same bytes written beside the catalog by an
+            // earlier build is found there too, and trusted the same way, so importing the same catalog never pins it twice.
+            var catalogDir = Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".";
+            var pinName = $"{Path.GetFileName(catalogPath)}.imported.{sha256.Substring(0, Math.Min(16, sha256.Length))}";
+            var besideCatalog = Path.Combine(catalogDir, pinName + ".zip");
+            long sourceBytesBeside = files.Sum(f => new FileInfo(f).Length);
+            if (File.Exists(besideCatalog) && BackupCatalogBytes(besideCatalog) == sourceBytesBeside) return besideCatalog;
+            var stem = WorkFolder.Write(catalogDir, pinName);
             var pin = stem + ".zip";
             // An existing pin is trusted only if it holds this catalog's bytes (fail-safe, operator 2026-11-06): a damaged file at the
             // name used to be returned as the pin forever. A damaged one is left where it is and a good pin is written beside it.
@@ -322,7 +329,9 @@ namespace Truedat
             // took two bad runs. So rotation keeps the newest N AND the newest N whose catalog is at least half the largest one held:
             // a bounded 2N, and the full backups survive any number of small ones. A backup it cannot read is never deleted and never
             // counted, so it cannot use up the quota either.
-            var backups = Directory.GetFiles(dir!)
+            // Both folders (WorkFolder): backups are written to the work folder, and one written beside the catalog before the
+            // move, or held when it ran, still counts against the quota and is still trimmed.
+            var backups = WorkFolder.Files(dir!, "*")
                 .Where(f => Path.GetFileName(f).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 .Select(f => (Path: f, Key: StampKey(Path.GetFileName(f).Substring(prefix.Length)), Bytes: BackupCatalogBytes(f)))
                 .Where(b => b.Bytes.HasValue)

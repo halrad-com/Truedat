@@ -43,9 +43,10 @@ namespace Truedat.Store
         /// (<see cref="HoldsSameFacts"/>) and left the wrong-remedy half, which this closes.</summary>
         internal static bool ImportCanResolve(int onlyCatalogCount) => onlyCatalogCount > 0;
 
-        static string LedgerPath(string catalogPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(catalogPath))!, DisagreeLedgerName);
+        /// <summary>A working file (WorkFolder): written to the library's work folder.</summary>
+        static string LedgerPath(string catalogPath) => global::Truedat.WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(catalogPath))!, DisagreeLedgerName);
 
-        /// <summary>Write the disagreeing paths beside the catalog and return the file's FULL path for the refusal to cite (the
+        /// <summary>Write the disagreeing paths to the work folder and return the file's FULL path for the refusal to cite (the
         /// operator is in the exe's folder, not the catalog's), or null when it could not be written — the refusal then names the
         /// paths inline, so it is never left with none.</summary>
         static string? WriteDisagreeLedger(string catalogPath, List<string> onlyCatalog, List<string> onlyStore, List<string>? changed)
@@ -66,7 +67,13 @@ namespace Truedat.Store
         /// <summary>The last refusal's ledger, once the two agree again: left behind it would describe a refusal that no longer applies.</summary>
         static void ClearDisagreeLedger(string catalogPath)
         {
-            try { var p = LedgerPath(catalogPath); if (File.Exists(p)) File.Delete(p); } catch { }
+            // Wherever it is: the work folder, or beside the catalog from a build before the move.
+            try
+            {
+                foreach (var d in global::Truedat.WorkFolder.Folders(Path.GetDirectoryName(Path.GetFullPath(catalogPath))!))
+                    try { var p = Path.Combine(d, DisagreeLedgerName); if (File.Exists(p)) File.Delete(p); } catch { }
+            }
+            catch { }
         }
 
         /// <summary>
@@ -320,8 +327,11 @@ namespace Truedat.Store
             if (archive)
             {
                 var stamp = DateTime.Now.ToString("yyyyMMdd.HHmmss", System.Globalization.CultureInfo.InvariantCulture);
-                zip = $"{catalogPath}.retired.{stamp}.zip";
-                for (int n = 2; File.Exists(zip); n++) zip = $"{catalogPath}.retired.{stamp}-{n}.zip";
+                // A working file (WorkFolder): the library's work folder, named after the catalog.
+                var catalogDir = Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".";
+                var catalogName = Path.GetFileName(catalogPath);
+                zip = global::Truedat.WorkFolder.Write(catalogDir, $"{catalogName}.retired.{stamp}.zip");
+                for (int n = 2; File.Exists(zip); n++) zip = global::Truedat.WorkFolder.Write(catalogDir, $"{catalogName}.retired.{stamp}-{n}.zip");
                 global::Truedat.CatalogArchive.WriteZipBackup(files.Select(f => (f, Path.GetFileName(f))).ToList(), zip);
             }
             foreach (var f in files) File.Delete(f);

@@ -43,7 +43,7 @@ namespace Truedat
             "exclusions", "no-exclusions", "exclude-playlist", "accept-flac-tag-drift",
             "retry-errors", "refresh", "refresh-features", "refresh-smfm", "refresh-authenticity", "refresh-chroma",
             "?", "h", "help", "version", "v",   // these print and exit before any scan, so nothing is reset beside them
-            "store", "store-dir", "no-store", "edges", "no-edges", "edge-arrays", "no-edge-arrays",
+            "store", "store-dir", "work-dir", "no-store", "edges", "no-edges", "edge-arrays", "no-edge-arrays",
             "publish", "no-publish", "split-mb", "keep-backups", "scan-summary", "fixup-after-scan",
         };
 
@@ -134,6 +134,19 @@ namespace Truedat
                     var name = Path.GetFileName(f);
                     if (IsKept(name)) continue;
                     if (Program.ClassifySideFile(name, catalogName, sidecarName, companion, storeNameHere) != Program.SideFile.None) Add(f, name);
+                }
+
+            // The work folder (WorkFolder): the working files truedat wrote for this library — the same classifier, narrowed to
+            // what IS a working file, because the work folder can be the exe's own folder, where the exe, the config file and the
+            // field registry sit. Entries under work/, after the catalog folder's, so a name held in both folders never collides
+            // and the store a restore looks for (truedat.db) is the catalog folder's.
+            var workDir = WorkFolder.For(dir);
+            if (!string.Equals(Path.GetFullPath(workDir).TrimEnd('\\'), Path.GetFullPath(dir).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) && Directory.Exists(workDir))
+                foreach (var f in Directory.GetFiles(workDir).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+                {
+                    var name = Path.GetFileName(f);
+                    if (IsKept(name)) continue;
+                    if (WorkFolder.IsWorkingFile(name, catalogName, sidecarName, companion, storeNameHere)) Add(f, "work/" + name);
                 }
 
             if (storeDir != null && !storeHere && Directory.Exists(storeDir))
@@ -241,8 +254,9 @@ namespace Truedat
             return result;
         }
 
+        /// <summary>The archive is a working file: the library's work folder (<see cref="WorkFolder"/>).</summary>
         internal static string ArchivePathFor(string catalogPath, DateTime nowLocal)
-            => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".",
-                            ArchivePrefix + nowLocal.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + ".zip");
+            => WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".",
+                                ArchivePrefix + nowLocal.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + ".zip");
     }
 }

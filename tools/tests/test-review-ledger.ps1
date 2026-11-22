@@ -46,6 +46,12 @@ function Assert($cond, $msg) {
 # still stop the run.
 function Invoke-Truedat {
     param([string[]] $TruedatArgs)
+    # A build with the work folder would put the working files (the verify list this rig checks) under
+    # <exe folder>\libraries\<id>; pin them beside the --moods catalog, the layout the checks below read.
+    if ($script:supportsWorkDir) {
+        $i = [Array]::IndexOf($TruedatArgs, '--moods')
+        if ($i -ge 0 -and $i + 1 -lt $TruedatArgs.Count) { $TruedatArgs = @('--work-dir', (Split-Path -Parent $TruedatArgs[$i + 1])) + $TruedatArgs }
+    }
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { & $TruedatExe @TruedatArgs 2>&1 | Out-String }
@@ -58,6 +64,7 @@ if (-not (Test-Path $TruedatExe)) {
     exit 1
 }
 $TruedatExe = (Resolve-Path $TruedatExe).Path
+$script:supportsWorkDir = (Invoke-Truedat @('--config')) -match 'work-dir'
 
 $work = Join-Path $env:TEMP ("review-ledger-test-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null

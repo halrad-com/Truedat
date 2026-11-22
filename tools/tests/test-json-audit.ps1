@@ -28,6 +28,10 @@ if (-not (Test-Path -LiteralPath $extractor -PathType Leaf)) {
     throw "Place the existing Essentia runtime beside the candidate before testing: $extractor"
 }
 $fixture = (Resolve-Path -LiteralPath (Join-Path $repoRoot 'tests/edges/fixtures/clip-44k-stereo-short.flac')).Path
+# A build that has the work folder (--work-dir, config key work-dir) would put each case's working files under
+# <exe folder>\libraries\<id> - beside the candidate exe, often the dist tree. Each case pins them to its own folder, the
+# layout these checks read; a build from before the work folder is run as it always was.
+$supportsWorkDir = ((& $TruedatExe --config 2>&1) | Out-String) -match 'work-dir'
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $OutputDirectory) { throw "Refusing to reuse evidence directory: $OutputDirectory" }
 if ($OutputDirectory -match '[^\x00-\x7F]' -or $fixture -match '[^\x00-\x7F]') {
@@ -103,6 +107,7 @@ function Invoke-Case([string] $Name, [string[]] $ModeArgs, [bool] $Json, [bool] 
     $null = New-Item -ItemType Directory -Path $tmp, $stage
     $caseExe = $TruedatExe
     $arguments = @('--no-edges', '--no-exclusions', '--stage-dir', $stage, '-p', '1', '--audit')
+    if ($supportsWorkDir) { $arguments = @('--work-dir', $folder) + $arguments }
     if ($StoreMode -eq 'config') {
         # Config is read beside the exe, never from cwd. Copy this small runtime
         # into the case so the test cannot change an installed/user config.

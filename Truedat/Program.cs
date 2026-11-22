@@ -870,7 +870,7 @@ namespace Truedat
             Console.WriteLine("Backup & snapshot:");
             Console.WriteLine("  --snapshot [path]   Read-only: bundle the current catalog + a manifest (trackCount,");
             Console.WriteLine("                      content SHA-256) + mbxmoods-exclude.json into a restorable, double-");
-            Console.WriteLine("                      clickable ZIP (default mbxmoods-snapshot-<ts>.zip beside the catalog).");
+            Console.WriteLine("                      clickable ZIP (default mbxmoods-snapshot-<ts>.zip in the work folder).");
             Console.WriteLine("                      With a store in force the STORE rides along too — a consistent VACUUM INTO");
             Console.WriteLine("                      copy, safe to take while a scan reads it — so the archive restores the");
             Console.WriteLine("                      authority and not just the files derived from it.");
@@ -1029,7 +1029,12 @@ namespace Truedat
             Console.WriteLine("                      are kept once in mbxmoods.json.retired.<time>.zip and removed). Config key `publish`;");
             Console.WriteLine("                      --publish turns it back on for one run. Needs a hub that reads the store.");
             Console.WriteLine("  --store-dir <dir>   Relocate the per-library default (<dir>\\<library-id>\\truedat.db); also a config key.");
-            Console.WriteLine("  --store-import      Load the catalog (and the ledgers beside it) into the store, idempotently.");
+            Console.WriteLine("  --work-dir <dir>    Where truedat's working files go: error and skip lists, scan summaries, logs, backups,");
+            Console.WriteLine("                      snapshots and reset archives. Default: the exe's folder when truedat is installed in");
+            Console.WriteLine("                      the library (Library\\truedat\\truedat.exe), else <exe folder>\\libraries\\<library-id>.");
+            Console.WriteLine("                      The catalog, sidecar, edges file, store, store-*.json and your rules stay beside the");
+            Console.WriteLine("                      catalog. Files already there move on the next writing run. Also a config key.");
+            Console.WriteLine("  --store-import      Load the catalog (and its error, skip and verify lists) into the store, idempotently.");
             Console.WriteLine("  --library-root <p>  Root for --store-import (else inferred per volume); --root-role primary|mirror|endpoint.");
             Console.WriteLine("  --machine-adopt     Let this machine take over a store minted on another host.");
             Console.WriteLine("  --store-export <out.json> [--export-root <root>]");
@@ -1052,7 +1057,7 @@ namespace Truedat
             Console.WriteLine("                      the --backfill fileMd5 fill and the --migrate fileMd5 strip.");
             Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
             Console.WriteLine("  --reset             Start over: archive every file truedat wrote for this library into");
-            Console.WriteLine("                      mbxmoods-reset-<time>.zip, remove them, then scan from nothing so every");
+            Console.WriteLine("                      mbxmoods-reset-<time>.zip in the work folder, remove them, then scan from nothing so every");
             Console.WriteLine("                      track is analyzed again. Asks you to type RESET first. Keeps the exclusion");
             Console.WriteLine("                      rules and the config file. Library scan only.");
             Console.WriteLine("  --imeanit           Confirms --reset when nobody is at the console to type the word.");
@@ -1148,6 +1153,8 @@ namespace Truedat
             // --reset archives the library's truedat files, removes them and scans from nothing; --imeanit is its confirmation
             // when nobody is at the console. Neither is a config key.
             "reset", "imeanit",
+            // where truedat's working files go (config key `work-dir`; default beside the exe — see WorkFolder)
+            "work-dir",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -1167,6 +1174,7 @@ namespace Truedat
             "library-root", "root-role", "store-export", "export-root", "store-roundtrip", "page-size", "store-dir",
             "budget",   // "edges-export" is deliberately absent: its value is optional (bare = beside the catalog).
             "split-mb",
+            "work-dir",
         };
 
         /// <summary>True when <paramref name="canonical"/> consumes the next token as its value.</summary>
@@ -2757,6 +2765,7 @@ namespace Truedat
             // resolved like --stats (positional / --moods / discovery) plus its ledgers into it.
             string? storePath = null;             // --store [path]: null = not asked; "" = asked, use the default location (S2 C0)
             string? storeDir = null;              // --store-dir <dir>: relocates the per-library default (<dir>\<library-id>\truedat.db)
+            string? workDir = null;               // --work-dir <dir>: where truedat's working files go (WorkFolder); default derived from the exe
             bool storeImportMode = false;
             string? storeLibraryRoot = null;
             string storeRootRole = "primary";
@@ -2937,6 +2946,7 @@ namespace Truedat
                 else if (canonical == "stats") statsMode = true;
                 else if (canonical == "store") storePath = ArgValueFollows(args, i, _argsFromConfig.Length) ? args[++i] : "";
                 else if (canonical == "store-dir" && i + 1 < args.Length) storeDir = args[++i];
+                else if (canonical == "work-dir" && i + 1 < args.Length) workDir = args[++i];
                 else if (canonical == "store-import") storeImportMode = true;
                 else if (canonical == "library-root" && i + 1 < args.Length) storeLibraryRoot = args[++i];
                 else if (canonical == "root-role" && i + 1 < args.Length) storeRootRole = args[++i];
@@ -3194,6 +3204,17 @@ namespace Truedat
             _noEdgesTyped = noEdges;
             global::Truedat.Store.StoreScan.PublishOff = global::Truedat.Store.StoreScan.ResolvePublishOff(noPublish, publishTyped, ConfigSaysOff("publish"));
             _storeDirOpt = storeDir;
+            // The work folder (2026-11-21): the rule is configured here, before any catalog is known; each library's folder is settled
+            // by the first writing use of it (BeginWork). A reading run never sets the hook, so it never creates or moves anything.
+            WorkFolder.Configure(workDir, AppDomain.CurrentDomain.BaseDirectory);
+            lock (_workGate) { _workLines.Clear(); _workLinesShown = 0; _workHeaderShown = false; }   // a Main run in-process (self-tests) starts clean
+            WorkFolder.BeginOnFirstUse = null;
+            if (!IsReadingRun(statsMode, storeInfoMode, listReviewMode, pathsMode, previewMode, showHelp, storeSummaryMode, verifyCoverageMode, selfTest,
+                              noLibrary: transcodeMode || convertDirMode || synthesize || seedMoods))
+                // The first working-file path a writing verb asks for settles that library's folder and moves what is beside the
+                // catalog — keyed on the folder the verb actually touches, never on a guess. The library scan settles its own
+                // explicitly (BeginWork at its entry) and says so in its tool-check block; every other verb says it here, on stderr.
+                WorkFolder.BeginOnFirstUse = dir => { BeginWork(Path.Combine(dir, MoodsFileName)); ShowWork(Console.Error); };
             if (noEdges) { _stageOpts.Edges = false; _edgesFromConfig = false; }
             global::Truedat.Edges.EdgeStore.CaptureArraysDefault = edgeArrays && !noEdgeArrays;   // the persistence gate only — the fold is unchanged (DBA review F6)
             if (workBudgetText != null && ParseBudget(workBudgetText) == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
@@ -3559,6 +3580,9 @@ namespace Truedat
             // before --snapshot because a run naming both should restore, not snapshot.
             if (restoreMode)
             {
+                // A backup, snapshot or reset archive named by its file name alone, as every earlier build's hint printed it: those
+                // live in the library's work folder now (WorkFolder), so the name is looked for there and beside the catalog too.
+                restoreArchivePath = FindArchiveByName(restoreArchivePath, ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out _, includeMarkerScan: false));
                 // store-v3 T09/T06: a snapshot that carries the store restores the STORE and republishes the files from
                 // it; a catalog-only archive still refuses, because restoring the derived files alone would leave the
                 // authority holding something else.
@@ -3819,10 +3843,11 @@ namespace Truedat
                     statsTracks = new ConcurrentDictionary<string, TrackEntry>(PathComparer.Instance);
                     LoadExistingMoods(statsPath!, statsTracks);
                 }
-                // --audit: tee the summary to truedat.log next to the moods file.
+                // --audit: tee the summary to truedat.log in the work folder. Only then is that path asked for: plain --stats is a
+                // reading run and creates no folder.
                 TeeWriter? statsTee = null;
-                string statsLog = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(statsPath!)) ?? ".", "truedat.log");
-                if (auditLog) { statsTee = new TeeWriter(Console.Out, statsLog); Console.SetOut(statsTee); _tee = statsTee; }
+                string? statsLog = auditLog ? WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(statsPath!)) ?? ".", "truedat.log") : null;
+                if (auditLog) { statsTee = new TeeWriter(Console.Out, statsLog!); Console.SetOut(statsTee); _tee = statsTee; }
                 // Load the exclusion rules FRESH and local to this report (never the scan's
                 // live _exclusions — see the MatchCount note on ComputeCatalogStats), so the
                 // summary can count entries a rule now covers and point at --prune-excluded.
@@ -4377,6 +4402,8 @@ namespace Truedat
             if (analyzeFileMode)
             {
                 using var afConsole = new JsonConsoleScope(jsonOutput);
+                // The work folder first: a store seeded below imports the ledgers, and must find them where they now are.
+                if (!string.IsNullOrEmpty(analyzeFileMoods)) { BeginWork(analyzeFileMoods!); ShowWork(Console.Error); }
                 if (EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog) == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // no store yet: this scan makes one (needs a --moods target); refused = the catalog could not be pinned
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 BeginScanRecordWithoutStore(analyzeFileMoods);                               // and a scan with none is recorded too, where the store would be
@@ -4403,7 +4430,7 @@ namespace Truedat
                     var afMissDir = !string.IsNullOrEmpty(analyzeFileMoods)
                         ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods)) ?? ".")
                         : Environment.CurrentDirectory;
-                    AppendSkipped(Path.Combine(afMissDir, "mbxmoods-skipped.csv"),
+                    AppendSkipped(WorkFolder.Read(afMissDir, "mbxmoods-skipped.csv"),
                         analyzeFilePath!, GetExtensionSafe(analyzeFilePath!), afMissReason);
                     Console.Error.WriteLine($"[skipped missing] {analyzeFilePath} ({afMissReason})");
                     var afHint = PathCodepageHint(analyzeFilePath!, File.Exists);
@@ -4421,7 +4448,7 @@ namespace Truedat
                     var afSkippedDir = !string.IsNullOrEmpty(analyzeFileMoods)
                         ? (Path.GetDirectoryName(Path.GetFullPath(analyzeFileMoods)) ?? ".")
                         : Environment.CurrentDirectory;
-                    var afSkippedPath = Path.Combine(afSkippedDir, "mbxmoods-skipped.csv");
+                    var afSkippedPath = WorkFolder.Read(afSkippedDir, "mbxmoods-skipped.csv");
                     AppendSkipped(afSkippedPath, analyzeFilePath!, afSkipExt ?? "", afStructReason);
                     Console.Error.WriteLine($"[skipped {StructuralSkipConsoleTag(afStructReason)}] {analyzeFilePath}");
                     Environment.ExitCode = 0;
@@ -4485,7 +4512,7 @@ namespace Truedat
                     // Ledgered like every other exclusion skip (--file-list's guard does
                     // the same) — README promises every exclusion lands in the CSV, not
                     // just the batch-mode ones. Report the path as typed; match on afKey.
-                    var afExclSkippedPath = Path.Combine(afExclDir, "mbxmoods-skipped.csv");
+                    var afExclSkippedPath = WorkFolder.Read(afExclDir, "mbxmoods-skipped.csv");
                     AppendSkipped(afExclSkippedPath, analyzeFilePath!, GetExtensionSafe(analyzeFilePath!), $"excluded (rule: {afExclReason})");
                     Console.Error.WriteLine($"[skipped excluded: {afExclReason}] {analyzeFilePath}");
                     Environment.ExitCode = 0;
@@ -4820,7 +4847,7 @@ namespace Truedat
                     ClearReviewRecord(analyzeFilePath!);
                     NoteFreshAnalysis(Path.GetFullPath(analyzeFilePath!));
                     if (afHasRecord) FlushRunLedger(afLedgerPath);
-                    PruneErrorsCsv(Path.Combine(afMoodsDir, "mbxmoods-errors.csv"));
+                    PruneErrorsCsv(WorkFolder.Read(afMoodsDir, "mbxmoods-errors.csv"));
                     if (_publish != null && !_publish.Ok) foreach (var line in OutputSummaryLines(afMoodsTracks.Count, _publish, analyzeFileMoods!)) Console.WriteLine(line);
                     ReportCatalog(analyzeFileMoods!, afMoodsTracks.Values, statsDetailThreshold,
                         countsNote: _publish != null && !_publish.Ok ? "counts are the STORE's — the file on disk was not published (see Output above)" : null);
@@ -5011,6 +5038,8 @@ namespace Truedat
             if (fileListMode)
             {
                 using var flConsole = new JsonConsoleScope(jsonOutput);
+                // The work folder first: a store seeded below imports the ledgers, and must find them where they now are.
+                if (!string.IsNullOrEmpty(analyzeFileMoods)) { BeginWork(analyzeFileMoods!); ShowWork(Console.Error); }
                 if (EnsureDefaultStore(analyzeFileMoods, chunked: false, auditLog) == SeedResult.Refused) { Environment.ExitCode = 1; return; }   // no store yet: this scan makes one (needs a --moods target); refused = the catalog could not be pinned
                 global::Truedat.Store.StoreResult.BeginScan(_storePath, _scanStartedUtc);   // T11: a scan with a store is known from here (TDA review P2b)
                 BeginScanRecordWithoutStore(analyzeFileMoods);                               // and a scan with none is recorded too, where the store would be
@@ -5024,7 +5053,7 @@ namespace Truedat
                     : (folderMode && !string.IsNullOrEmpty(folderPath)
                         ? Path.GetFullPath(folderPath)
                         : Environment.CurrentDirectory);
-                var flSkippedPath = Path.Combine(flSkippedDir, "mbxmoods-skipped.csv");
+                var flSkippedPath = WorkFolder.Read(flSkippedDir, "mbxmoods-skipped.csv");
 
                 // Explicit exclusions — loaded once for the whole batch (walk + workers).
                 // A missing file excludes nothing; a broken one refuses the scan.
@@ -5803,7 +5832,7 @@ namespace Truedat
                 EmitDirStatSummary();
                 FlushRunLedger(flLedgerPath);
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
-                    PruneErrorsCsv(Path.Combine(flLedgerDir, "mbxmoods-errors.csv"));
+                    PruneErrorsCsv(WorkFolder.Read(flLedgerDir, "mbxmoods-errors.csv"));
                 if (!string.IsNullOrEmpty(analyzeFileMoods))
                 {
                     if (_publish != null && !_publish.Ok) foreach (var line in OutputSummaryLines(flMoodsTracks.Count, _publish, analyzeFileMoods!)) Console.WriteLine(line);
@@ -5944,6 +5973,9 @@ namespace Truedat
                 chunkHostSuffix = SanitizeForFilename(Environment.MachineName);
                 moodsPath = InsertFilenameSuffix(moodsPath, chunkHostSuffix);
             }
+            // The work folder: settled, and the working files already beside the catalog moved into it, before the reset collects
+            // them and before the errors list is read. Said in the tool-check block below, where the --audit log sees it.
+            BeginWork(moodsPath);
             // --reset: before the store is settled and before anything is loaded, so the scan below starts from nothing.
             if (_resetRequested)
             {
@@ -5959,7 +5991,7 @@ namespace Truedat
             // No store in force: the library scan is recorded too. Not a --chunk shard — shards share one folder, and each would
             // overwrite the others' record.
             else if (libraryScan && chunkTotal == 0) BeginScanRecordWithoutStore(moodsPath);
-            var logPath = Path.Combine(outputDir, "truedat.log");
+            var logPath = WorkFolder.Write(outputDir, "truedat.log");
             TeeWriter? tee = null;
             if (auditLog)
             {
@@ -5975,6 +6007,7 @@ namespace Truedat
             if (fixupMode) modeList.Add("fixup");
             if (analyzeMode || (!checkFilenames && !duplicatesMode && !migrateMode && !fixupMode)) modeList.Add("analyze");
             Console.WriteLine($"  Modes: {string.Join("+", modeList)} | Parallelism: {parallelism}{(retryErrors ? " | RetryErrors" : "")}{(_refreshFeatures ? " | Refresh" : "")}{(_refreshChroma ? " | RefreshChroma" : "")}");
+            ShowWork(Console.Out);   // the work folder, beside the modes line: inside the --audit tee, before any verb below writes there
 
             // Clean up orphaned hardlinks from previous crashed runs
             CleanupOrphanedFiles();
@@ -6071,16 +6104,15 @@ namespace Truedat
                 return;
             }
 
-            var errorsPath = Path.Combine(outputDir, "mbxmoods-errors.csv");
-            if (chunkHostSuffix != null)
-                errorsPath = InsertFilenameSuffix(errorsPath, chunkHostSuffix);
+            // The ledgers are READ and appended: WorkFolder.Read finds each where it is — the work folder, or beside the catalog
+            // when another program held it at the move — so the errors list that decides what this scan skips is the real one.
+            string ScanLedgerPath(string name) => WorkFolder.Read(outputDir, chunkHostSuffix != null ? Path.GetFileName(InsertFilenameSuffix(name, chunkHostSuffix)) : name);
+            var errorsPath = ScanLedgerPath("mbxmoods-errors.csv");
             // Human-readable diagnostic log, same stem/suffix as the CSV (…-errors.<host>.log).
-            var errorsLogPath = Path.ChangeExtension(errorsPath, ".log");
+            var errorsLogPath = ScanLedgerPath("mbxmoods-errors.log");
             // Phase 5.1 — DSD/DSF skip ledger. Same dir / chunk-suffix convention
             // as errors.csv so two-machine scans don't stomp each other.
-            var skippedPath = Path.Combine(outputDir, "mbxmoods-skipped.csv");
-            if (chunkHostSuffix != null)
-                skippedPath = InsertFilenameSuffix(skippedPath, chunkHostSuffix);
+            var skippedPath = ScanLedgerPath("mbxmoods-skipped.csv");
 
             Console.WriteLine($"Loading iTunes library: {xmlPath}");
             try { LibraryXmlWrittenUtc = File.GetLastWriteTimeUtc(xmlPath); } catch { LibraryXmlWrittenUtc = default(DateTime); }
@@ -7317,8 +7349,9 @@ namespace Truedat
             {
                 try
                 {
-                    var summaryDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
-                    summaryFile = Path.Combine(summaryDir, ScanSummaryFileName(Directory.EnumerateFiles(summaryDir, "mbxmoods-scan-*.txt").Select(p => Path.GetFileName(p)!), startTime));
+                    // Numbered against the summaries in BOTH folders (one held at the move still counts), written to the work folder.
+                    var summaryCatDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+                    summaryFile = WorkFolder.Write(summaryCatDir, ScanSummaryFileName(WorkFolder.Files(summaryCatDir, "mbxmoods-scan-*.txt").Select(p => Path.GetFileName(p)!), startTime));
                     summaryTee = new TeeWriter(summaryPrevOut, summaryFile);
                     Console.SetOut(summaryTee);
                 }
@@ -7565,12 +7598,14 @@ namespace Truedat
                 // rotation note is not inside the file it describes. Same shape as the catalog backups' Rotated: line.
                 try
                 {
-                    var summaryDir = Path.GetDirectoryName(Path.GetFullPath(summaryFile!))!;
-                    var stale = ScanSummariesToPrune(Directory.EnumerateFiles(summaryDir, "mbxmoods-scan-*.txt").Select(p => Path.GetFileName(p)!), _keepBackups);
+                    // Rotation reads both folders: the quota is the library's, wherever each summary sits.
+                    var rotateCatDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+                    var byName = WorkFolder.Files(rotateCatDir, "mbxmoods-scan-*.txt").ToDictionary(p => Path.GetFileName(p)!, p => p, StringComparer.OrdinalIgnoreCase);
+                    var stale = ScanSummariesToPrune(byName.Keys, _keepBackups);
                     int removed = 0;
                     foreach (var name in stale)
                     {
-                        try { File.Delete(Path.Combine(summaryDir, name)); removed++; } catch { }   // a file held open is next run's problem, not this run's failure
+                        try { File.Delete(byName[name]); removed++; } catch { }   // a file held open is next run's problem, not this run's failure
                     }
                     if (removed > 0) Console.WriteLine($"Rotated:    removed {removed} old scan summary(s), keeping the newest {_keepBackups} (--keep-backups).");
                 }
@@ -9183,17 +9218,23 @@ namespace Truedat
 
             var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
             var stem = Path.GetFileNameWithoutExtension(moodsPath);
+            // Receipts are working files: in the work folder, or beside the catalog when written by a build before the move.
+            var lookIn = WorkFolder.Folders(dir);
             string[] files;
-            try { files = Directory.GetFiles(dir, $"{stem}-verify*.receipt.json"); }
+            try
+            {
+                if (!lookIn.Any(Directory.Exists)) files = new string[0];
+                else files = WorkFolder.Files(dir, $"{stem}-verify*.receipt.json").ToArray();
+            }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Error: could not read receipts in {dir}: {ex.Message}");
+                Console.Error.WriteLine($"Error: could not read receipts in {string.Join(" or ", lookIn)}: {ex.Message}");
                 return 1;
             }
             if (files.Length == 0)
             {
-                Console.WriteLine("No verify receipts found beside this catalog.");
-                Console.WriteLine($"  Looked for: {Path.Combine(dir, stem + "-verify*.receipt.json")}");
+                Console.WriteLine("No verify receipts found for this catalog.");
+                foreach (var d in lookIn) Console.WriteLine($"  Looked for: {Path.Combine(d, stem + "-verify*.receipt.json")}");
                 Console.WriteLine("  Run truedat --verify (optionally with --chunk M/N) to produce them.");
                 return 1;
             }
@@ -9867,11 +9908,11 @@ namespace Truedat
             // Per-shard CSV: a completed shard must be durably done and must not be overwritten
             // by the next one. Host too, matching the scan's convention, so two machines sharding
             // the same library directory don't collide.
-            var csvPath = Path.Combine(
-                Path.GetDirectoryName(moodsPath) ?? ".",
-                "mbxmoods-verify.csv");
-            if (chunkTotal > 0)
-                csvPath = InsertFilenameSuffix(csvPath, $"{SanitizeForFilename(Environment.MachineName)}.{chunkIndex}of{chunkTotal}");
+            // A working file: the work folder (the receipt below rides beside it, and --verify-coverage reads both folders).
+            var verifyCatDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+            var csvPath = WorkFolder.Write(verifyCatDir, chunkTotal > 0
+                ? InsertFilenameSuffix("mbxmoods-verify.csv", $"{SanitizeForFilename(Environment.MachineName)}.{chunkIndex}of{chunkTotal}")
+                : "mbxmoods-verify.csv");
             try
             {
                 var lines = new List<string> { "status\tpath\tdetail\tbackfilledFields" };
@@ -9970,8 +10011,7 @@ namespace Truedat
             // "rescan" it would be a lie; it needs --retry-errors. We cross-reference that
             // list here and bucket accordingly, and show the prior Essentia failure reason
             // (the actionable fact) instead of the sha pair for those entries.
-            var errIndex = LoadExistingErrors(
-                Path.Combine(Path.GetDirectoryName(moodsPath) ?? ".", "mbxmoods-errors.csv"));
+            var errIndex = LoadExistingErrors(WorkFolder.Read(verifyCatDir, "mbxmoods-errors.csv"));
 
             var attention = details
                 .Select(d => d.Split('\t'))
@@ -11325,24 +11365,28 @@ namespace Truedat
         /// exception is <paramref name="keepDamaged"/> — a --restore replacing a catalog that may BE the damaged one: refusing would
         /// block the recovery, so the damaged file is kept aside as <c>.damaged.&lt;time&gt;.zip</c>, a name rotation never matches
         /// or counts.</remarks>
-        static string BackupCatalogCompressed(string catalogPath, bool keepDamaged = false)
+        internal static string BackupCatalogCompressed(string catalogPath, bool keepDamaged = false)
         {
             var timestamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
+            // Backups are working files: named after the catalog, written to its library's work folder.
+            var catalogName = Path.GetFileName(catalogPath);
+            var catalogDir = Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".";
+            string Named(string suffix) => WorkFolder.Write(catalogDir, catalogName + suffix);
             if (keepDamaged)
             {
                 try { CatalogArchive.RequireWholeDocument(catalogPath); }
                 catch (CatalogArchive.BackupRefusedException ex)
                 {
-                    var dmg = $"{catalogPath}.damaged.{timestamp}.zip";
-                    for (int n = 2; File.Exists(dmg); n++) dmg = $"{catalogPath}.damaged.{timestamp}-{n}.zip";
+                    var dmg = Named($".damaged.{timestamp}.zip");
+                    for (int n = 2; File.Exists(dmg); n++) dmg = Named($".damaged.{timestamp}-{n}.zip");
                     CatalogArchive.WriteZipBackup(new[] { (catalogPath, CatalogArchive.CatalogEntryName) }, dmg, requireWholeDocuments: false);
                     Console.WriteLine($"Damaged: the catalog being replaced is not a whole document; kept aside as {dmg}, not counted as a backup");
                     if (_audit) Console.Error.WriteLine($"  [audit] {ex.Message}");
                     return dmg;
                 }
             }
-            var bakPath = $"{catalogPath}.bak.{timestamp}.zip";
-            for (int n = 2; File.Exists(bakPath); n++) bakPath = $"{catalogPath}.bak.{timestamp}-{n}.zip";
+            var bakPath = Named($".bak.{timestamp}.zip");
+            for (int n = 2; File.Exists(bakPath) || File.Exists(Path.Combine(catalogDir, Path.GetFileName(bakPath))); n++) bakPath = Named($".bak.{timestamp}-{n}.zip");
             CatalogArchive.WriteZipBackup(catalogPath, bakPath);
             var removed = CatalogArchive.RotateBackups(catalogPath, _keepBackups);
             if (removed > 0)
@@ -11386,8 +11430,9 @@ namespace Truedat
             var dir = Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".";
             if (string.IsNullOrEmpty(outPath))
             {
+                // The default place is the work folder: a snapshot is a working file, not something the hub reads.
                 var ts = DateTime.Now.ToString("yyyyMMdd.HHmmss");
-                outPath = Path.Combine(dir, $"mbxmoods-snapshot-{ts}.zip");
+                outPath = WorkFolder.Write(dir, $"mbxmoods-snapshot-{ts}.zip");
             }
             // The exclusion file, if it sits beside the catalog, rides along so the
             // snapshot is a complete policy+data state.
@@ -11402,7 +11447,7 @@ namespace Truedat
             long storeBytes = 0;
             if (_storePath != null)
             {
-                stagedStore = Path.Combine(dir, Path.GetFileName(outPath!) + ".store.tmp");
+                stagedStore = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outPath!)) ?? dir, Path.GetFileName(outPath!) + ".store.tmp");
                 try { File.Delete(stagedStore); } catch { }
                 try
                 {
@@ -11436,7 +11481,7 @@ namespace Truedat
                 Console.WriteLine($"  SHA-256:  {info.ContentSha256}");
                 Console.WriteLine($"  Exclude:  {(haveExclude ? "bundled" : "none beside catalog")}");
                 if (storeMember.HasValue)
-                    Console.WriteLine($"  Restore:  truedat --restore {Path.GetFileName(outPath!)} — restores the store and republishes the files from it");
+                    Console.WriteLine($"  Restore:  truedat --restore \"{Path.GetFullPath(outPath!)}\" — restores the store and republishes the files from it");
                 return 0;
             }
             catch (Exception ex)
@@ -11587,6 +11632,23 @@ namespace Truedat
         /// hand if you mean to roll policy back too), so restore's blast radius is one
         /// file.
         /// </summary>
+        /// <summary>An archive named by its bare file name that is not in the current directory: the library's work folder, then the
+        /// catalog folder. A path the operator typed (anything with a folder in it) means exactly that path and is returned as it is,
+        /// as is a name found nowhere — the restore then says it was not found, naming what was typed.</summary>
+        internal static string? FindArchiveByName(string? archive, string? catalogPath)
+        {
+            if (string.IsNullOrEmpty(archive) || string.IsNullOrEmpty(catalogPath)) return archive;
+            try
+            {
+                if (File.Exists(archive)) return archive;
+                var name = Path.GetFileName(archive!);
+                if (!string.Equals(name, archive, StringComparison.Ordinal)) return archive;
+                var found = WorkFolder.Read(Path.GetDirectoryName(Path.GetFullPath(catalogPath!)) ?? ".", name);
+                return File.Exists(found) ? found : archive;
+            }
+            catch { return archive; }
+        }
+
         static int RunRestore(string archivePath, string destCatalog)
         {
             Console.WriteLine("=== Restore Mode ===");
@@ -13700,6 +13762,53 @@ namespace Truedat
         /// (0x20..0x7E). Music extensions in the wild are all ASCII (.mp3, .flac,
         /// .m4a, .wav, .aiff, .ogg, .opus, .wma) so the common case is unchanged.
         /// </summary>
+        // ---- the work folder (WorkFolder, operator 2026-11-21) ----------------------------------------------
+        static readonly object _workGate = new object();
+        static readonly List<string> _workLines = new List<string>();
+        static int _workLinesShown;
+        static bool _workHeaderShown;
+
+        /// <summary>A WRITING run settles the work folder for the library whose catalog is <paramref name="catalogPath"/> and moves
+        /// the working files beside the catalog into it — before any of them is read, so the errors list the scan consults, the
+        /// skipped list its summary counts and the backups rotation trims are the ones that were already there. Once per catalog
+        /// folder; never throws (a move that fails leaves files where they are, and they are still read from there). What it
+        /// has to say is kept for <see cref="ShowWork"/>.</summary>
+        internal static void BeginWork(string catalogPath)
+        {
+            string dir;
+            try { dir = Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? "."; } catch { return; }
+            lock (_workGate)
+            {
+                if (WorkFolder.IsSettled(dir)) return;
+                try
+                {
+                    WorkFolder.Begin(dir, out var note);
+                    if (note != null) _workLines.Add(note);
+                    var moved = WorkFolder.Describe(WorkFolder.MoveExisting(catalogPath, _storePath));
+                    if (moved != null) _workLines.Add(moved);
+                }
+                catch (Exception ex) { _workLines.Add($"Work folder: the move did not run ({ex.Message}); the working files are read where they are"); }
+            }
+        }
+
+        /// <summary>The work folder line — once per run, in the block of resolved paths — and whatever the move or a fallback
+        /// had to say that has not been said yet. Nothing in a run that settled no work folder (a reading run).</summary>
+        internal static void ShowWork(TextWriter w)
+        {
+            lock (_workGate)
+            {
+                if (WorkFolder.Current == null) return;
+                if (!_workHeaderShown) { w.WriteLine($"  Work dir:   {WorkFolder.Current}"); _workHeaderShown = true; }
+                for (; _workLinesShown < _workLines.Count; _workLinesShown++) w.WriteLine("  " + _workLines[_workLinesShown]);
+            }
+        }
+
+        /// <summary>The verbs that only read: they settle no work folder, create none and move nothing, and find each working
+        /// file in the work folder first and beside the catalog second. Also the verbs that are not about a library at all.</summary>
+        internal static bool IsReadingRun(bool stats, bool storeInfo, bool listReview, bool paths, bool preview, bool help,
+                                          bool storeSummary, bool verifyCoverage, bool selfTest, bool noLibrary)
+            => stats || storeInfo || listReview || paths || preview || help || storeSummary || verifyCoverage || selfTest || noLibrary;
+
         /// <summary>One row of the --paths report: what it is, where it resolved, whether it is
         /// there, and a short note when the file itself can say something useful.</summary>
         internal sealed class PathEntry
@@ -13757,16 +13866,22 @@ namespace Truedat
 
             Add("libraryXml", "library XML",
                 string.IsNullOrEmpty(libraryXml) ? Path.Combine(dir, "iTunes Music Library.xml") : libraryXml!);
-            Add("log", "log", Path.Combine(dir, "truedat.log"));
+
+            // The work folder and the working files in it, resolved by the one rule (WorkFolder) the writing runs use. Each file is
+            // shown where it IS — the work folder, or beside the catalog on an install that has not run a writing verb since the
+            // move — and where it would be written when it is in neither. Nothing here creates the folder.
+            Add("workDir", "work dir", WorkFolder.For(dir), WorkFolder.Reason(dir));
+            Add("log", "log", WorkFolder.Read(dir, "truedat.log"));
 
             // Host-suffixed ledgers: this host's names, via the same helpers the scan uses. A
             // shard from another machine writes its own and is deliberately NOT guessed at here.
             var host = SanitizeForFilename(Environment.MachineName);
-            string Hosted(string name) => InsertFilenameSuffix(Path.Combine(dir, name), host);
+            string Hosted(string name) => WorkFolder.Read(dir, InsertFilenameSuffix(name, host));
             Add("errorsCsv", "errors (csv)", Hosted("mbxmoods-errors.csv"));
             Add("errorsLog", "errors (log)", Hosted("mbxmoods-errors.log"));
             Add("skipped", "skipped", Hosted("mbxmoods-skipped.csv"));
-            Add("verifyCsv", "verify", Path.Combine(dir, "mbxmoods-verify.csv"));
+            Add("verifyCsv", "verify", WorkFolder.Read(dir, "mbxmoods-verify.csv"));
+            // The duplicate report stays beside the catalog with the operator's verdicts on it (WorkFolder.DuplicatesPrefix).
             Add("duplicates", "duplicates", Path.Combine(dir, "mbxmoods-duplicates.json"));
 
             var reviewRoot = Path.GetDirectoryName(Path.GetFullPath(dir));
@@ -14201,7 +14316,7 @@ namespace Truedat
             }
             hits.Sort((a, b) => string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase));
 
-            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-speech.csv");
+            var csvPath = WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-speech.csv");
             var sb = new StringBuilder();
             sb.AppendLine("path,artist,title,album,genre,codec,speechConfidence,method");
             foreach (var h in hits)
@@ -14246,7 +14361,7 @@ namespace Truedat
             }
             missing.Sort((a, b) => string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase));
 
-            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-smfm-missing.csv");
+            var csvPath = WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-smfm-missing.csv");
             var sb = new StringBuilder();
             sb.AppendLine("path,artist,title,album,codec");
             foreach (var m in missing)
@@ -14339,7 +14454,7 @@ namespace Truedat
                 return c != 0 ? c : string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase);
             });
 
-            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-smfm.csv");
+            var csvPath = WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-smfm.csv");
             var sb = new StringBuilder();
             sb.AppendLine("path,state,artist,title,album,codec,smfmBpm,smfmChannel,topScore,scores");
             foreach (var m in rows)
@@ -14454,7 +14569,7 @@ namespace Truedat
                               .ToList();
 
             // CSV first — codec then path, so filtering the codec column yields contiguous rows.
-            var csvPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-formats.csv");
+            var csvPath = WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".", "mbxmoods-formats.csv");
             var sb = new StringBuilder();
             sb.AppendLine("path,codec,codecRaw,bitrate,sampleRate,bitDepth,fileSize,artist,album,title");
             foreach (var r in rows.OrderBy(r => r.Codec, StringComparer.OrdinalIgnoreCase)
@@ -14835,6 +14950,7 @@ namespace Truedat
             ["store-export"] = "a path",          ["store-roundtrip"] = "a path",
             ["synth-moods"] = "a path",           ["synth-output"] = "a path",
             ["transcode"] = "a path",             ["transcode-out"] = "a path",
+            ["work-dir"] = "a path",
         };
 
         /// <summary>Flag-shaped, by the same test the parse loop applies.</summary>
@@ -14943,7 +15059,7 @@ namespace Truedat
             return SideFile.None;   // the operator's own files share this directory
         }
 
-        static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null, ISet<string>? scanWorkList = null, ExclusionSet? exclusions = null, string? countsNote = null)
+        internal static void ReportCatalog(string path, IEnumerable<TrackEntry> entriesEnum, int detailThreshold, ISet<string>? libraryKeys = null, ISet<string>? scanWorkList = null, ExclusionSet? exclusions = null, string? countsNote = null)
         {
             var entries = entriesEnum as IList<TrackEntry> ?? new List<TrackEntry>(entriesEnum);
             int total = entries.Count;
@@ -15062,7 +15178,8 @@ namespace Truedat
             if (s.MissingWave > 0)
             {
                 var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
-                var errs = LoadExistingErrors(Path.Combine(dir, "mbxmoods-errors.csv"));
+                // Read where each list is: the work folder, else beside the catalog (an install that has not scanned since the move).
+                var errs = LoadExistingErrors(WorkFolder.Read(dir, "mbxmoods-errors.csv"));
                 // Short-file / over-length entries are skipped MID-scan: they stay on the
                 // work list (so they are neither orphaned nor pre-scan-filtered) and land in
                 // mbxmoods-skipped.csv, NOT the error list. Without consulting it they fall
@@ -15070,7 +15187,7 @@ namespace Truedat
                 // count never clears (the short-file guard shipped after these were analyzed,
                 // leaving them with old features nothing will re-derive). Give them their own
                 // bucket that points at the skipped ledger, not --refresh.
-                var skipped = LoadSkippedPaths(Path.Combine(dir, "mbxmoods-skipped.csv"));
+                var skipped = LoadSkippedPaths(WorkFolder.Read(dir, "mbxmoods-skipped.csv"));
                 // Only entries the scan actually re-analyzes can be cleared by
                 // --refresh-features. Precedence per entry:
                 //   errored (on the error list)           -> --retry-errors   (bad file)
@@ -15321,42 +15438,68 @@ namespace Truedat
                 // catalog or the store (the pinned imports, the retired publication, the store's
                 // migration backups). 2026-10-26: truedat's own pinned catalogs sat in
                 // no bucket and the total came up short.
-                var reportNames = new List<string>();
-                long repBytes = 0, bakBytes = 0; int bakCount = 0;
-                try
+                // Two folders since 2026-11-21 (WorkFolder): the catalog folder, and the work folder the working files moved to.
+                // Each folder's groups are listed with the folder named, so the reader can find what a line counts. In the catalog
+                // folder everything ClassifySideFile calls ours counts (a working file left there — held at the move — included);
+                // in the work folder only what IS a working file, because that folder can be the exe's own, beside the exe and
+                // its settings. One reading of each folder, so nothing is counted twice. The folders are named only once the
+                // work folder holds something: before a writing run has settled it, everything is beside the catalog and the
+                // block reads exactly as it did before there was a work folder.
+                var folders = WorkFolder.Folders(dir);              // [work folder, catalog folder], or one entry when they are the same
+                bool twoFolders = folders.Count > 1;
+                var ordered = twoFolders ? new[] { folders[1], folders[0] } : new[] { folders[0] };   // the catalog folder's lines first, as before
+                var groups = new List<(bool IsCatalogFolder, string Folder, List<string> ReportNames, long RepBytes, long BakBytes, int BakCount)>();
+                foreach (var folder in ordered)
                 {
-                    var catalogName = Path.GetFileName(path);
-                    var sidecarName = Path.GetFileName(Path.ChangeExtension(path, ".mbxs"));
-                    var storeName = storeInfo != null ? Path.GetFileName(storeInfo.Path) : null;
-                    foreach (var f in Directory.GetFiles(dir))
+                    bool isCatalogFolder = !twoFolders || ReferenceEquals(folder, folders[1]);
+                    var reportNames = new List<string>();
+                    long repBytes = 0, bakBytes = 0; int bakCount = 0;
+                    try
                     {
-                        var name = Path.GetFileName(f);
-                        switch (ClassifySideFile(name, catalogName, sidecarName, compName, storeName))
-                        {
-                            case SideFile.Report:
-                                repBytes += new FileInfo(f).Length;
-                                reportNames.Add(name);
-                                break;
-                            case SideFile.Backup:
-                                bakBytes += new FileInfo(f).Length; bakCount++;
-                                break;
-                        }
+                        var catalogName = Path.GetFileName(path);
+                        var sidecarName = Path.GetFileName(Path.ChangeExtension(path, ".mbxs"));
+                        var storeName = storeInfo != null ? Path.GetFileName(storeInfo.Path) : null;
+                        if (Directory.Exists(folder))
+                            foreach (var f in Directory.GetFiles(folder))
+                            {
+                                var name = Path.GetFileName(f);
+                                var side = ClassifySideFile(name, catalogName, sidecarName, compName, storeName);
+                                if (!isCatalogFolder && !WorkFolder.IsWorkingFile(name, catalogName, sidecarName, compName, storeName)) continue;
+                                switch (side)
+                                {
+                                    case SideFile.Report:
+                                        repBytes += new FileInfo(f).Length;
+                                        reportNames.Add(name);
+                                        break;
+                                    case SideFile.Backup:
+                                        bakBytes += new FileInfo(f).Length; bakCount++;
+                                        break;
+                                }
+                            }
+                        reportNames.Sort(StringComparer.OrdinalIgnoreCase);
                     }
-                    reportNames.Sort(StringComparer.OrdinalIgnoreCase);
+                    catch { /* the sibling scan is best-effort */ }
+                    groups.Add((isCatalogFolder, folder, reportNames, repBytes, bakBytes, bakCount));
                 }
-                catch { /* the sibling scan is best-effort */ }
-                if (reportNames.Count > 0)
+                bool nameFolders = groups.Any(g => !g.IsCatalogFolder && (g.ReportNames.Count > 0 || g.BakCount > 0));
+                foreach (var g in groups)
                 {
-                    accounted += repBytes;
-                    SizeLine("Reports:", repBytes, ReportsDetail(reportNames));
-                }
+                    string where = g.IsCatalogFolder ? "beside the catalog" : $"in the work folder {g.Folder}";
+                    if (g.ReportNames.Count > 0)
+                    {
+                        accounted += g.RepBytes;
+                        SizeLine("Reports:", g.RepBytes, ReportsDetail(g.ReportNames));
+                        if (nameFolders) ReportNote(where);
+                    }
 
-                if (bakCount > 0)
-                {
-                    double avgBak = (double)bakBytes / bakCount;
-                    accounted += bakBytes;
-                    SizeLine("Backups:", bakBytes, $"{bakCount} compressed .zip"
-                        + (catBytes > 0 ? $" (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)" : ""));
+                    if (g.BakCount > 0)
+                    {
+                        double avgBak = (double)g.BakBytes / g.BakCount;
+                        accounted += g.BakBytes;
+                        SizeLine("Backups:", g.BakBytes, $"{g.BakCount} compressed .zip"
+                            + (catBytes > 0 ? $" (~{catBytes / Math.Max(1.0, avgBak):F0}x vs plain)" : ""));
+                        if (nameFolders) ReportNote(where);
+                    }
                 }
 
                 if (accounted > 0)
@@ -17337,6 +17480,12 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
 
             Console.WriteLine("Truedat FFT self-test");
+
+            // The in-process self-tests keep today's layout — working files beside the catalog they built — so they find them where
+            // they look and write nothing under the build output. WorkFolderSelfTest turns this off for its own cases.
+            WorkFolder.UseCatalogFolderForTest = true;
+            WorkFolder.BeginOnFirstUse = null;
+            WorkFolderSelfTest.Run(Assert);                          // truedat's working files leave the catalog folder: the rule, the move, every site
 
             // v2 store (Truedat/Store/*): its own file, same Assert, so the single exe stays self-contained.
             global::Truedat.Store.StoreSelfTest.Run(Assert);

@@ -204,7 +204,7 @@ namespace Truedat.Store
                     }
                     tx.Complete();
                 }
-                foreach (var side in Directory.GetFiles(dir ?? ".", Path.GetFileName(staged) + ".bak.*"))   // a migration's own backup, of a copy
+                foreach (var side in StagedBackups(staged))   // a migration's own backup, of a copy
                     try { File.Delete(side); } catch { }
             }
             catch (StoreException) { DeleteStaged(staged); throw; }
@@ -220,8 +220,10 @@ namespace Truedat.Store
             if (File.Exists(store))
             {
                 var stamp = DateTime.Now.ToString("yyyyMMdd.HHmmss");
-                backup = store + ".bak." + stamp + ".db";
-                for (int n = 2; File.Exists(backup); n++) backup = store + ".bak." + stamp + "-" + n + ".db";   // two restores in one second (an undo) never collide
+                var storeName = Path.GetFileName(store);
+                // WorkFolder.BackupPath: the work folder for a store beside a settled catalog, beside the store otherwise.
+                backup = global::Truedat.WorkFolder.BackupPath(store, storeName + ".bak." + stamp + ".db");
+                for (int n = 2; File.Exists(backup); n++) backup = global::Truedat.WorkFolder.BackupPath(store, storeName + ".bak." + stamp + "-" + n + ".db");   // two restores in one second (an undo) never collide
                 try
                 {
                     replacedGeneration = VacuumInto(store, backup).Generation;
@@ -265,10 +267,20 @@ namespace Truedat.Store
                 try { if (File.Exists(f)) File.Delete(f); } catch { }
             try
             {
-                foreach (var f in Directory.GetFiles(Path.GetDirectoryName(staged) ?? ".", Path.GetFileName(staged) + ".bak.*"))
+                foreach (var f in StagedBackups(staged))
                     try { File.Delete(f); } catch { }
             }
             catch { }
+        }
+
+        /// <summary>The backups a migration on open made of a staged copy: beside it, or in the work folder when the copy sits in a
+        /// settled catalog folder (SchemaMigrator.BackupBeside goes through WorkFolder.BackupPath).</summary>
+        static IEnumerable<string> StagedBackups(string staged)
+        {
+            var found = new List<string>();
+            foreach (var d in global::Truedat.WorkFolder.BackupFolders(staged))
+                try { found.AddRange(Directory.GetFiles(d, Path.GetFileName(staged) + ".bak.*")); } catch { }
+            return found;
         }
 
         static long ReadGenerationOf(string storePath)
@@ -292,7 +304,9 @@ namespace Truedat.Store
             // Fail-safe (operator 2026-11-06), the catalog backups' rule: keep the newest N AND the newest N at least half the
             // largest, so small store backups never push the full ones out; a file that is not a SQLite database is never deleted
             // and never counted.
-            var backups = Directory.GetFiles(dir!)
+            // Both places a store's backups can be (WorkFolder.BackupFolders): its backup folder, then the store's own folder.
+            var backups = global::Truedat.WorkFolder.BackupFolders(storePath)
+                .SelectMany(d => { try { return Directory.GetFiles(d); } catch { return new string[0]; } })
                 .Where(f => Path.GetFileName(f).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 .Select(f => (Path: f, Bytes: StoreBackupBytes(f)))
                 .Where(b => b.Bytes.HasValue)
