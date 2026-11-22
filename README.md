@@ -31,7 +31,7 @@ parts), the `.mbxs` sidecar, `mbxedges.v1.json`, the store `truedat.db` and ever
 record. So do your own files: `mbxmoods-exclude.json`, `apply-result.json` beside it, and the
 `--duplicates` report with the verdicts you keep on it. Everything else truedat writes is a
 **working file** and goes to the **work folder**: the error, skip and verify lists, `truedat.log`,
-the saved scan summaries, the catalog's and the store's backups, snapshots, reset archives, and the
+the saved scan summaries, the catalog's and the store's backups, snapshots, clear and reset archives, and the
 `--list-*` reports.
 
 The work folder is the folder `truedat.exe` is in when truedat is installed in the library (the
@@ -134,52 +134,61 @@ store it replaces (`truedat.db.bak.<ts>.db`, same `--keep-backups` rotation); an
 because a restore is a change the hub must notice even when the restored bytes are older than what it
 cached. An archive carrying no store still refuses, and says which archive would have worked.
 
-### Starting over (`--reset`)
+### Starting over (`--clear`, `--reset`)
 
 A scan trusts what the catalog already holds: an entry with every field present is a cache hit,
 whatever build measured it. That keeps a rescan fast, and it means a value measured by an older
-build stays as it was. `--reset` measures the whole library again:
+build stays as it was. Two verbs measure the whole library again:
 
 ```
-truedat --reset
+truedat --clear     a clean slate that keeps how you have it set up
+truedat --reset     the full reset: your rules and decisions go too
 ```
 
-It puts every file truedat wrote for this library — beside the catalog and in the work folder — into
-one zip in the work folder (`mbxmoods-reset-<time>.zip`; the work folder's files sit under `work/`
-inside it), removes them, and then runs the normal library scan from nothing, so
-every track is analyzed again. It lists the files and asks you to type `RESET` first. `--imeanit`
-confirms it instead when nobody is at the console (a script, a scheduled task). Without one or the
+Each puts the files it takes — beside the catalog and in the work folder — into one zip in the work
+folder (`mbxmoods-clear-<time>.zip` or `mbxmoods-reset-<time>.zip`; the work folder's files sit under
+`work/` inside it), removes them, and then runs the normal library scan from nothing, so every track
+is analyzed again. Nothing is removed until the zip has been written and read back; there is no way to
+skip it. Each lists the files and asks you to type its word first (`CLEAR` or `RESET`). `--imeanit`
+confirms either instead when nobody is at the console (a script, a scheduled task). Without one or the
 other it stops and changes nothing.
 
-- **Archived and removed:** the catalog, its sidecar and `mbxedges.v1.json`, the store, the error and
-  skip lists, the review records, the saved scan summaries and other reports, and the catalog's
-  earlier backups.
-- **Kept:** `mbxmoods-exclude.json`, the config file, earlier snapshots, earlier reset archives.
+| | `--clear` | `--reset` |
+|---|---|---|
+| The catalog and its parts, the sidecar, `mbxedges.v1.json`, the store, `store-*.json`, the error and skip lists, scan summaries, logs, catalog and store backups, the duplicate report files | archived, then removed | archived, then removed |
+| The review list | archived; your `ignore` decisions are carried into a new review list, unchanged | archived, then removed — `ignore` decisions included |
+| Your own files: `mbxmoods-exclude.json` (and its backups and playlist), `apply-result.json`, `mbxmoods-duplicates.verdicts.json` | **kept** | archived, then removed |
+| Earlier snapshots and clear or reset archives | kept | kept |
+| The config file and the field registry | kept | kept |
 
-The review list goes with the rest. Files you marked `ignore` there are forgotten and are tried again by
-the new scan.
+`--reset` used to keep the exclusion rules; it no longer does. Its confirmation says so on a line of its
+own before it asks, names the files it found, and points to `--clear` as the one that keeps them.
 
 What to expect:
 
 - It is a full analysis pass. Until the new scan's first save the library has no catalog.
-- If the pass is interrupted, run a plain `truedat` (not `--reset` again): tracks already analyzed
-  are served from the new catalog and the rest continue.
+- If the pass is interrupted, run a plain `truedat` (not `--clear` or `--reset` again): tracks
+  already analyzed are served from the new catalog and the rest continue.
 - A library that used the store and edges gets both back from the new scan.
-- It stops before changing anything when the extractor is not found, when part of the library is
+- After `--reset` the scan runs with no exclusion rules, so files your rules kept out are analyzed.
+- Each stops before changing anything when the extractor is not found, when part of the library is
   unreachable or its files are not on this machine (a catalog copied from another machine could not
   be rebuilt there), when another program holds one of the files (the message names it; close it
-  and run again), or when another verb is on the command line.
+  and run again), or when another verb — the other of the two included — is on the command line.
+  `--clear` also stops when it cannot read the review list, since it would lose the `ignore`
+  decisions it keeps.
 - If the scan that follows stops for a reason of its own, fix that and run a plain `truedat`: the
-  reset has already happened and the archive holds the old files.
-- MBXHub does not watch for a reset. If MusicBee stays open it keeps the values it loaded before,
+  clear or reset has already happened and the archive holds the old files.
+- MBXHub does not watch for either. If MusicBee stays open it keeps the values it loaded before,
   and if it is started while the catalog is absent it shows no moods; either way, use Reload mood
-  data in MBXHub (or restart MusicBee) once the scan has finished. Closing MusicBee for the reset
-  avoids both.
-- To go back, `truedat --restore mbxmoods-reset-<time>.zip` restores the catalog (the bare name is
-  found in the work folder). If the library had a
-  store, add `--store` so the store is restored and the catalog published from it (without it the run
-  restores the catalog alone and tells you the archive holds a store). The error and skip lists and the
-  review records are in the zip as well and are not put back.
+  data in MBXHub (or restart MusicBee) once the scan has finished. Closing MusicBee first avoids both.
+- To go back, `truedat --restore mbxmoods-clear-<time>.zip` (or `mbxmoods-reset-<time>.zip`) restores
+  the catalog (the bare name is found in the work folder). If the library had a store, add `--store`
+  so the store is restored and the catalog published from it (without it the run restores the catalog
+  alone and tells you the archive holds a store). A reset archive's rule files are put back beside the
+  catalog as well, byte for byte; if one of them exists now, the restore stops first, names it and
+  changes nothing — move it aside to take the archive's copy. The error and skip lists and the review
+  records are in the zip as well and are not put back.
 
 ### Scanning a folder (`--folder`)
 
@@ -525,11 +534,16 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           shards ONE AT A TIME — each save rewrites the whole catalog, so
                           concurrent shards would overwrite each other's backfills.
   --retry-errors          Re-attempt all previously failed files (clears error log)
-  --reset                 Start over: archive every file truedat wrote for this library into
-                          mbxmoods-reset-<time>.zip (in the work folder), remove them, then scan from nothing so every
-                          track is analyzed again. Asks you to type RESET first. Keeps the
-                          exclusion rules and the config file. Library scan only.
-  --imeanit               Confirms --reset when nobody is at the console to type the word.
+  --clear                 Start over and keep how it is set up: archive truedat's analysis for this
+                          library into mbxmoods-clear-<time>.zip (in the work folder), remove it, then
+                          scan from nothing. Keeps your settings, exclusion rules, apply-result.json,
+                          duplicate verdicts and the review list's ignore decisions. Asks you to type
+                          CLEAR first. Library scan only.
+  --reset                 The full reset: what --clear does, and it also archives and removes your
+                          exclusion rules, apply-result.json, duplicate verdicts and ignore decisions,
+                          into mbxmoods-reset-<time>.zip. Keeps the config file. Asks you to type RESET
+                          first. Library scan only.
+  --imeanit               Confirms --clear or --reset when nobody is at the console to type the word.
   --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
                           audioMd5, chromaprint) and fileMd5 (kept with --file-md5), rename
                           SMFM keys (sensme*->smfm*) (creates a compressed backup). Field

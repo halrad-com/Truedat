@@ -78,7 +78,7 @@ local tidy-up:
   catalog and its parts, the sidecar, `mbxedges.v1.json`, the store with `-wal`/`-shm`, every `store-*.json`, the
   operator's rules (`mbxmoods-exclude.json` and its children, `apply-result.json`), the `mbxmoods-duplicate*` family and
   the review files stay exactly where they were. Everything else `ClassifySideFile` counts — the ledgers, scan
-  summaries, logs, catalog and store backups, snapshots, reset archives, list reports — goes to the work folder: the
+  summaries, logs, catalog and store backups, snapshots, clear and reset archives, list reports — goes to the work folder: the
   exe's folder when it is the catalog folder or a direct child of it, else `<exe>\libraries\<StoreLocation.LibraryId>`,
   or `--work-dir` / config `work-dir`. `WorkFolder.IsWorkingFile` is the one definition of which files move;
   `WorkFolder.Resolve` the one rule for where. A writing run moves what an earlier build left beside the catalog before
@@ -127,24 +127,37 @@ local tidy-up:
   operator KNOWS is gone. Their contract briefly listed a `purge` mode for truedat; it was removed
   on our correction. Do not implement one to satisfy a doc — `--force-clean` acts on ground truth
   (the volume is unreachable *and* the operator asserted it), not on a classification.
-- **`--reset` is not a third way to lose an entry on a classification — it is the operator starting over** (2026-11-20).
-  It archives every file truedat wrote for the library into `mbxmoods-reset-<time>.zip` in the work folder, removes
-  them, and runs the library scan from nothing. The file set is whatever the scan summary's size block counts — beside
-  the catalog, everything `ClassifySideFile` (one definition of "ours") names; in the work folder, what
-  `WorkFolder.IsWorkingFile` names, under `work/` in the archive — less `ResetCommand.IsKept` — the exclusion rules, the field registry,
-  snapshots and earlier reset archives stay, and so does the config file. In the hub's review folder it takes
-  `mbxmoods-review.json` and nothing else. Nothing is removed until the archive has been written and read back; a file
-  another program holds stops it before the archive is written (so it refuses while the hub holds the store); and it
-  refuses unless the scan after it can run — extractor found, library roots answering, at least half of a sample of
-  the library's files on this machine. It needs the typed word `RESET` or `--imeanit`; **neither flag may ever become a
-  config key** (pinned by the self-test), and it is refused beside any other verb. A store that was in force is
-  recreated by the scan that follows (`ResetCommand.StoreAfterReset`, decided while the file still exists).
-  `--restore <reset archive>` brings the catalog back, and the store when the restore run has a store in force
-  (`--store`); without one it restores the catalog alone and says the archive holds a store. The operator's `ignore`
-  decisions in the review list go with the ledger, by the operator's ruling that a reset takes the review files too;
-  the confirmation text says so. The store's write-ahead log is folded into its main file before archiving
+- **`--clear` and `--reset` are not a third way to lose an entry on a classification — they are the operator starting
+  over** (2026-11-20; split in two 2026-11-21, operator: "clear keeps what you have but clears the truedat db / reset is a
+  full reset"). One implementation (`ResetCommand`, `RunReset(verb, …)`); the verbs differ only in `ResetCommand.Keeps`,
+  the one keep-list, pinned as a table. Each archives what it takes into `mbxmoods-clear-<time>.zip` /
+  `mbxmoods-reset-<time>.zip` in the work folder, removes it, and runs the library scan from nothing. The file set
+  (`ResetCommand.Collect`) is whatever the scan summary's size block counts — beside the catalog, everything
+  `ClassifySideFile` (one definition of "ours") names; in the work folder, what `WorkFolder.IsWorkingFile` names, under
+  `work/` in the archive; in the hub's review folder, `mbxmoods-review.json` and nothing else — less `Keeps`. **Both
+  keep** snapshots, every earlier clear or reset archive, the config file, the field registry and the exclusion file's
+  lock. **`--clear` also keeps the operator's own files** (`ResetCommand.IsOperatorFile`: `mbxmoods-exclude*` — the
+  rules, their backups, the exclusion playlist — `apply-result.json` and `mbxmoods-duplicates.verdicts.json`) and
+  carries the review list's `ignore` records into a fresh list, unchanged, written by the scan's own writer
+  (operator: "give me a clean slate but i dont want to resetup how its working now"); a review list it cannot read
+  refuses the run. **`--reset` takes all of it**, `ignore` decisions included — a change to a shipped destructive verb,
+  so its confirmation says on its own line before the prompt that it removes the exclusion rules and duplicate verdicts,
+  names the files it found, and points to `--clear`. Nothing is removed until the archive has been written and read
+  back (no flag skips it); a file another program holds stops it before the archive is written (so it refuses while the
+  hub holds the store); and it refuses unless the scan after it can run — extractor found, library roots answering, at
+  least half of a sample of the library's files on this machine. It needs the typed word (`CLEAR` / `RESET`) or
+  `--imeanit`; **none of the three flags may ever become a config key** (pinned by the self-test), and each verb is
+  refused beside any other verb, the other one included. A store that was in force is recreated by the scan that follows
+  (`ResetCommand.StoreAfterReset`, decided while the file still exists). `--restore <archive>` brings the catalog back,
+  and the store when the restore run has a store in force (`--store`); without one it restores the catalog alone and
+  says the archive holds a store. A reset archive's operator files (top-level entries `IsOperatorFile` names, in an
+  archive with no snapshot manifest — a snapshot's bundled exclusion file still stays in the archive) are put back
+  beside the catalog byte for byte, and a restore that would write over one that exists now refuses before changing
+  anything, naming it. The store's write-ahead log is folded into its main file before archiving
   (`ResetCommand.FoldStoreLog`), because `--restore` takes only the main file out of an archive. The new store's
-  generation starts over (operator: "reset means reset"); a hub left running reloads with Reload mood data.
+  generation starts over (operator: "reset means reset"); a hub left running reloads with Reload mood data. Two points
+  are the architect's, not yet the operator's ruling: the archive always comes before removal, and the config file is
+  kept by both.
 - **Reason strings in `preview.json`'s `review[].reasons`** are rendered by the hub, not parsed
   by it — confirmed on their side. Enriching the text is safe; the shape is not.
 - **The `kind` string in every JSON artifact written to the hub's review folder is a contract** (2026-11-20).
