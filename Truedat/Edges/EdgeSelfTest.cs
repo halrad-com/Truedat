@@ -66,7 +66,7 @@ namespace Truedat.Edges
                 assert(id == build, $"the committed {build} exe resolves to its build name (got {id})");
             }
             assert(string.Equals(Program.LatestExtractorMd5, "192f3cfa530f2f58f04dc2668f4d9643", StringComparison.OrdinalIgnoreCase),
-                $"the latest known extractor is .8 (0ed34b3: the .7 sources built profile-guided with link-time optimization; got {Program.LatestExtractorMd5})");
+                $"the latest known extractor is .8 (0ed34b3; got {Program.LatestExtractorMd5})");
             assert(!EdgeProducer.SupportsFrames("output-x64.4") && EdgeProducer.SupportsFrames("output-x64.5") && EdgeProducer.SupportsFrames("output-x64.6")
                    && EdgeProducer.SupportsFrames("output-x64.7") && EdgeProducer.SupportsFrames("output-x64.8") && !EdgeProducer.SupportsFrames(null),
                 $"binary frames: .4 no, .5 / .6 / .7 / .8 yes, unknown no ({EdgeProducer.SupportedBuildsText})");

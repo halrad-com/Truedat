@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -1546,6 +1546,15 @@ namespace Truedat
         // only (TeeWriter.FileOnly) — at per-entry-per-save volume they'd flood the
         // console, and Console.Error wasn't tee'd so the detail never reached the log.
         static TeeWriter? _tee;
+
+        /// <summary>A note for the LOG, never the console: something that happened, was handled, and leaves the operator nothing
+        /// to do — a sweep skipped, a cache file that could not be deleted, work the next run retries by itself. Under
+        /// <c>--audit</c> it lands in truedat.log; with no tee installed it is dropped. Operator, 2026-11-22: "let's not show
+        /// things that are not clear and especially if they are not at all actionable and have no purpose — other than for
+        /// logging". Anything the operator can act on stays on the console; anything that costs the run a fact worth seeing
+        /// gets a COUNT in the summary rather than a line per occurrence.</summary>
+        internal static void LogNote(string line) => _tee?.FileOnly(line);
+
         internal static StageOptions _stageOpts = new StageOptions();
         // CLI signal-disable toggles live on StageOptions (siblings of the staging
         // knobs they share an end-of-scan cost profile with). Loose static bools
@@ -2136,9 +2145,9 @@ namespace Truedat
             int siblings = CountSiblingTruedatProcesses();
             if (!ShouldSweepOrphans(siblings))
             {
-                Console.Error.WriteLine($"  WARNING: {siblings} other truedat process(es) running — skipping the orphan sweep.");
-                Console.Error.WriteLine("           Truedat is single-instance by design; concurrent runs on one library are not supported");
-                Console.Error.WriteLine("           (use --chunk M/N across machines). Sweeping now could delete the other run's working files.");
+                // Log, not console: the sweep is best-effort cleanup of an earlier run's temp files, and another truedat running
+                // (the hub's autoscan, most often) is normal. Skipping it costs this run nothing and asks the operator for nothing.
+                LogNote($"  NOTE: {siblings} other truedat process(es) running — orphan sweep skipped; sweeping now could delete the other run's working files.");
                 return;
             }
 
@@ -7710,8 +7719,9 @@ namespace Truedat
                     if (spoolLine != null) Console.WriteLine($"  Spool:      {spoolLine}");
                     // Every track gives its room back when its extractor exits. Anything still held here was never returned, and
                     // would have been refusing room to the tracks after it.
+                    // Log, not console: this is our own accounting, and nothing an operator does changes it.
                     if (_spoolBudget.Value.ReservedBytes != 0)
-                        Console.WriteLine($"  WARNING: {_spoolBudget.Value.ReservedBytes / 1048576.0:F0} MB of the shared RAM budget was never given back; later tracks may have been refused room");
+                        LogNote($"  NOTE: {_spoolBudget.Value.ReservedBytes / 1048576.0:F0} MB of the shared RAM budget was never given back; later tracks may have been refused room");
                 }
             }
             catch { }
@@ -12019,19 +12029,22 @@ namespace Truedat
         // changes it (WMA Lossless: same decoder family, untested). The refresh set after
         // .6 is the catalog's .ape entries (+ wmalossless .wma), not the library.
         internal const string LatestExtractorMd5 = "192f3cfa530f2f58f04dc2668f4d9643";
-        internal const string LatestExtractorSummary = "output-x64.8: the .7 analysis code built profile-guided with link-time optimization - same output, about 2% less extractor time";
+
+        /// <summary>The extractor builds we know, by MD5 → the build's NAME and nothing else. What each build changed is
+        /// reference material (SBOM.md, essentia-build/OUTPUT-BUILDS.md), not something a scan recites: the only thing the
+        /// output has to answer is which build ran and whether it is the current one. Every accepted drop of a build keeps
+        /// its own MD5 here under the shared name — a deployed earlier drop must still resolve by name.</summary>
         static readonly Dictionary<string, string> KnownExtractors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["192f3cfa530f2f58f04dc2668f4d9643"] = "output-x64.8 — the .7 sources and flags built profile-guided with link-time optimization; same output, about 2% less extractor time (current, 0ed34b3)",
-            ["0fb6f804f8f53dad65c4c963e6447e47"] = "output-x64.7 — .6 plus shared decode (RAM spool, capped per track), fused chords/tuning HPCP, and streaming Danceability/DynamicComplexity; same output (220d877; the .8 fallback)",
-            // Every accepted .6 drop keeps its MD5 here under the same name (option A): a deployed earlier drop must still resolve by name.
-            ["64b55cec008649c673fa13c9ab8dd4b6"] = "output-x64.6 — optimized, accurate bpm, 13-hour file support, binary frames for --edges, decoder fix, scan profile (drop 2, 296f87d; the .7 fallback)",
-            ["2fe852f564c894691e144697c6a0d200"] = "output-x64.6 — drop 1 (7319de5): decoder fix only; fails on APE (StereoDemuxer overflow) and refuses the scan profile — superseded by drop 2",
-            ["6f47bdfcaadfd4f510c5e1621c07945d"] = "output-x64.5 — optimized, accurate bpm, 13-hour file support, binary frames for --edges; crashes on 65535-block stereo FLAC (.6 fixes)",
-            ["c6a436d0fe9a33a4c8eac120d9e6243f"] = "output-x64.4 — optimized, accurate bpm, 13-hour file support; no binary frames (--edges needs .5)",
-            ["6c6e2737d97c146fdedf13fb4832183e"] = "output-x64.3 — optimized, 13-hour file support; INACCURATE bpm (first-peak key-collision bug)",
-            ["f52e166e9063b23cdda538cdf8530ed4"] = "output-x64.2 — 13-hour file support; NOT optimized (~3x slower), inaccurate bpm",
-            ["05c4c77bb204026e87b3a593e0d0ed2e"] = "output-x64.1 — 200-min cap only; NOT optimized (~3x slower), inaccurate bpm",
+            ["192f3cfa530f2f58f04dc2668f4d9643"] = "output-x64.8",   // 0ed34b3: the .7 sources, built profile-guided with LTO
+            ["0fb6f804f8f53dad65c4c963e6447e47"] = "output-x64.7",   // 220d877: shared decode, fused chords/tuning HPCP
+            ["64b55cec008649c673fa13c9ab8dd4b6"] = "output-x64.6",   // 296f87d: drop 2 — decoder fix + scan profile
+            ["2fe852f564c894691e144697c6a0d200"] = "output-x64.6",   // 7319de5: drop 1 — fails on APE, refuses the scan profile
+            ["6f47bdfcaadfd4f510c5e1621c07945d"] = "output-x64.5",   // binary frames for --edges; crashes on 65535-block stereo FLAC
+            ["c6a436d0fe9a33a4c8eac120d9e6243f"] = "output-x64.4",   // accurate bpm, 13-hour files; no binary frames
+            ["6c6e2737d97c146fdedf13fb4832183e"] = "output-x64.3",   // INACCURATE bpm (first-peak key collision)
+            ["f52e166e9063b23cdda538cdf8530ed4"] = "output-x64.2",   // not optimized (~3x slower), inaccurate bpm
+            ["05c4c77bb204026e87b3a593e0d0ed2e"] = "output-x64.1",   // 200-min cap, not optimized, inaccurate bpm
         };
 
         /// <summary>The extractor builds (by MD5, never by name — every .6 drop shares the name) that honour the SCAN profile
@@ -12144,11 +12157,7 @@ namespace Truedat
             try
             {
                 string md5 = ExtractorMd5(exePath) ?? throw new IOException("unreadable");
-                if (KnownExtractors.TryGetValue(md5, out var desc))
-                {
-                    int dash = desc.IndexOf(" —", StringComparison.Ordinal);
-                    return dash > 0 ? desc.Substring(0, dash) : desc;
-                }
+                if (KnownExtractors.TryGetValue(md5, out var name)) return name;
                 return "md5:" + md5.Substring(0, Math.Min(12, md5.Length));
             }
             catch { return "unknown"; }
@@ -12490,7 +12499,7 @@ namespace Truedat
 
             // (5) the files from the store, always — or, with publication off, the working copy removed (this run wrote it; no archive)
             if (global::Truedat.Store.StoreScan.PublishOff)
-                try { global::Truedat.Store.StoreScan.RetirePublishedFiles(catalogPath, archive: false); } catch (Exception ex) { Console.Error.WriteLine($"  WARNING: the working copy beside the store was not removed ({ex.Message})"); }
+                try { global::Truedat.Store.StoreScan.RetirePublishedFiles(catalogPath, archive: false); } catch (Exception ex) { LogNote($"  NOTE: the working copy beside the store was not removed ({ex.Message})"); }
             var pub2 = global::Truedat.Store.StoreScan.Publish(store, catalogPath, out var rep2);
             rec.Export = new global::Truedat.Store.StoreResultExport
             {
@@ -12594,7 +12603,9 @@ namespace Truedat
             if (!global::Truedat.Edges.EdgeProducer.SupportsFrames(build))
                 return $"Error: --edges needs extractor build {required} (binary frames via --frames-bin); the resolved extractor is {build} ({essentiaExe}). Update essentia_streaming_extractor_music.exe from truedat-deps.";
             var ffmpeg = _ffmpegPath.Value;
-            Console.WriteLine($"  Edges:      enabled ({_edgeSettings.ProducerVersion}; {_edgeSettings.EdgeSeconds} s per edge, series at {_edgeSettings.PoolHz}/s, frames in {_stageOpts.StageDir})");
+            // The producer version already carries the settings (edges@v3;e30;p10 = 30 s per edge, series at 10/s), so spelling
+            // them out beside it said the same thing twice; the frames file's directory is a temp path nobody acts on.
+            Console.WriteLine($"  Edges:      enabled ({_edgeSettings.ProducerVersion})");
             if (ffmpeg == null) Console.WriteLine("  WARNING:    ffmpeg.exe not found — edge rms (crest, transition) will be null and silence falls back to the EBU series");
             return null;
         }
@@ -12705,7 +12716,7 @@ namespace Truedat
                 if (c != null && c.BytesAfter < c.BytesBefore)
                     Console.WriteLine($"  [store compacted: {c.BytesBefore:N0} -> {c.BytesAfter:N0} bytes ({100.0 * (c.BytesAfter - c.BytesBefore) / Math.Max(1, c.BytesBefore):+0.0;-0.0;0.0}%) in {c.Seconds:F1} s]");
             }
-            catch (Exception ex) { Console.Error.WriteLine($"  WARNING: store not compacted ({ex.Message}); the next scan retries"); }
+            catch (Exception ex) { LogNote($"  NOTE: store not compacted ({ex.Message}); the next scan retries"); }
         }
 
         /// <summary>The options truedat.config.json added to this run (after a typed flag overrode any of them); empty without a config.</summary>
@@ -13165,7 +13176,7 @@ namespace Truedat
                     if (swept > 0) global::Truedat.Store.StoreLog.Info($"edges: {swept} row(s) at superseded producer versions pruned (store-wide sweep)");
                     t.SupersededPruned += swept;
                 }
-                catch (Exception ex) { Console.Error.WriteLine($"  WARNING: superseded edge rows not pruned ({ex.Message}); the next scan retries"); }
+                catch (Exception ex) { LogNote($"  NOTE: superseded edge rows not pruned ({ex.Message}); the next scan retries"); }
                 // Operator 2026-10-22: every entry in exactly one bucket, and the buckets sum to the entries (store-result detail carries them all).
                 Console.WriteLine($"  store: {t.Entries} entries written ({t.BucketsCompact}; {t.EntitiesCreated} new media), {t.Failures} failures recorded, {t.ElapsedMs / 1000.0:F1} s -> {storePath}"
                                   + (t.Accounted == t.Entries ? "" : $" — WARNING: {t.Accounted} of {t.Entries} accounted for"));
@@ -13189,6 +13200,9 @@ namespace Truedat
         /// <summary>When this process's scan began (ISO-8601 UTC) — the record's startedUtc.</summary>
         static readonly string _scanStartedUtc = DateTime.UtcNow.ToString("o");
 
+        /// <summary>One line: which extractor ran, and the only thing an operator can act on — whether it is the current build.
+        /// <see cref="ExtractorBuildLabel"/> is the single wording, shared with <c>-v</c>; an older or unrecognized build carries
+        /// its own "update the extractor", so there is no second WARNING line saying it again.</summary>
         static void ReportExtractorBuild(string exePath)
         {
             try
@@ -13197,16 +13211,7 @@ namespace Truedat
                 using (var m = System.Security.Cryptography.MD5.Create())
                 using (var fs = File.OpenRead(exePath))
                     md5 = BitConverter.ToString(m.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
-                if (KnownExtractors.TryGetValue(md5, out var desc))
-                {
-                    Console.WriteLine($"  Extractor:  {desc}");
-                    if (!string.Equals(md5, LatestExtractorMd5, StringComparison.OrdinalIgnoreCase))
-                        Console.WriteLine($"  WARNING:    a newer extractor is available ({LatestExtractorSummary}). Update dist/truedat/essentia_streaming_extractor_music.exe.");
-                }
-                else
-                {
-                    Console.WriteLine($"  Extractor:  unrecognized build (MD5 {md5.Substring(0, Math.Min(12, md5.Length))}...) — current is {LatestExtractorSummary}");
-                }
+                Console.WriteLine($"  Extractor:  {ExtractorBuildLabel(md5)}");
             }
             catch { /* extractor-build detection is best-effort */ }
         }
@@ -13249,10 +13254,8 @@ namespace Truedat
         internal static string ExtractorBuildLabel(string? md5)
         {
             if (md5 == null) return "found, unreadable";
-            if (!KnownExtractors.TryGetValue(md5, out var desc))
+            if (!KnownExtractors.TryGetValue(md5, out var name))
                 return $"unrecognized build (MD5 {md5.Substring(0, Math.Min(12, md5.Length))}...)";
-            int dash = desc.IndexOf(" — ", StringComparison.Ordinal);
-            string name = dash > 0 ? desc.Substring(0, dash) : desc;
             return string.Equals(md5, LatestExtractorMd5, StringComparison.OrdinalIgnoreCase) ? name + " (current)" : name + " (older; update the extractor)";
         }
 
@@ -14483,6 +14486,8 @@ namespace Truedat
             int resampledOnce = Volatile.Read(ref _preResampledCount);
             if (resampledOnce > 0)
                 Console.WriteLine($"  Resampled:  {resampledOnce} hi-res file(s) converted to 44.1 kHz once before analysis");
+            var fellBack = ResampleFallbackLine(Volatile.Read(ref _preResampleFellBackCount));
+            if (fellBack != null) Console.WriteLine(fellBack);
             foreach (var line in ResampleSummaryLines()) Console.WriteLine(line);
             foreach (var line in RateSplitSummaryLines()) Console.WriteLine(line);
             int success = Volatile.Read(ref _stageSuccessCount);
@@ -22971,6 +22976,36 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Assert(ExtractorBuildLabel(LatestExtractorMd5) == "output-x64.8 (current)", $"env: the current extractor is labelled current ({ExtractorBuildLabel(LatestExtractorMd5)})");
                 Assert(ExtractorBuildLabel("6f47bdfcaadfd4f510c5e1621c07945d") == "output-x64.5 (older; update the extractor)", $"env: an older known build says so ({ExtractorBuildLabel("6f47bdfcaadfd4f510c5e1621c07945d")})");
                 Assert(ExtractorBuildLabel("0123456789abcdef0123456789abcdef").StartsWith("unrecognized build", StringComparison.Ordinal), "env: an unknown build is unrecognized");
+                // Operator 2026-11-22, on the scan header's extractor line: "wtf is that saying". The registry holds build NAMES;
+                // what a build changed is reference material, not a sentence every scan recites. Drift guard, both directions.
+                foreach (var kv in KnownExtractors)
+                    Assert(kv.Value.StartsWith("output-x64.", StringComparison.Ordinal) && kv.Value.Length <= 14 && kv.Value.IndexOf(' ') < 0,
+                        $"extractor registry: {kv.Key.Substring(0, 8)} holds a build name and nothing else (got \"{kv.Value}\")");
+                {
+                    // The header line itself: one line, the build and whether it is current — no second line repeating it.
+                    string probe = Path.Combine(Path.GetTempPath(), "truedat-extractor-line-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".bin");
+                    File.WriteAllText(probe, "not an extractor");
+                    var prevOut = Console.Out; var cap = new System.IO.StringWriter();
+                    Console.SetOut(cap);
+                    try { ReportExtractorBuild(probe); } finally { Console.SetOut(prevOut); try { File.Delete(probe); } catch { } }
+                    var lines = cap.ToString().Replace("\r", "").TrimEnd('\n').Split('\n');
+                    Assert(lines.Length == 1, $"extractor line: one line, whatever the build ({lines.Length}: {string.Join(" | ", lines)})");
+                    Assert(lines[0].StartsWith("  Extractor:  unrecognized build (MD5 ", StringComparison.Ordinal) && lines[0].IndexOf("WARNING", StringComparison.Ordinal) < 0,
+                        $"extractor line: an unknown build says so and nothing more (\"{lines[0]}\")");
+                    Assert(lines[0].Length <= ReportWidth, $"extractor line: it fits the report ({lines[0].Length} columns)");
+                }
+                Assert(ResampleFallbackLine(0) == null && ResampleFallbackLine(2) == "  Resampled:  2 file(s) could not be converted; analyzed at the source rate (--audit logs each)",
+                    $"resample fallback: silent when none, one counted line when some ({ResampleFallbackLine(2)})");
+                {
+                    // LogNote is for the log only: with no --audit tee installed it writes nowhere, and never to the console.
+                    var prevOut = Console.Out; var prevErr = Console.Error;
+                    var capOut = new System.IO.StringWriter(); var capErr = new System.IO.StringWriter();
+                    Console.SetOut(capOut); Console.SetError(capErr);
+                    try { LogNote("  a handled thing the operator cannot act on"); }
+                    finally { Console.SetOut(prevOut); Console.SetError(prevErr); }
+                    Assert(capOut.ToString().Length == 0 && capErr.ToString().Length == 0,
+                        $"log note: nothing reaches the console (out \"{capOut}\", err \"{capErr}\")");
+                }
                 Assert(FfmpegVersionFrom("ffmpeg version 2026-10-08-git-ec420ba161-full_build-www.gyan.dev Copyright (c) 2000-2026") == "2026-10-08-git-ec420ba161-full_build-www.gyan.dev", "env: ffmpeg's version token is read");
                 Assert(FfmpegVersionFrom("") == null && FfmpegVersionFrom("garbage") == null, "env: no version line reads as none");
                 // R6 (review 2026-10-25): a scan with failed tracks exits 1, unless the library went away mid-scan — then the source-loss
@@ -29044,6 +29079,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// <summary>Count of files converted once before analysis this run (the end-of-scan summary line).</summary>
         static int _preResampledCount;
 
+        /// <summary>One line for the whole run when a conversion fell back, or null when none did — the count, not a line per
+        /// track, and where to find the reasons. Every such track IS analyzed, at its source rate.</summary>
+        internal static string? ResampleFallbackLine(int fellBack)
+            => fellBack <= 0 ? null
+             : $"  Resampled:  {fellBack} file(s) could not be converted; analyzed at the source rate (--audit logs each)";
+
+        /// <summary>Count of files whose conversion did not finish, so the extractor read the original instead. Each one used to
+        /// print its own WARNING mid-scan (operator 2026-11-22: "a bunch of WARNs … don't show those unless there is something to
+        /// do") — the track is analyzed either way, so the reason goes to the log and the run reports the COUNT.</summary>
+        static int _preResampleFellBackCount;
+
         // The per-rate split ("By rate:" in the summary). The extractor's CPU and the conversion's time are read on the worker
         // thread that made them — AnalyzeWithEssentia and the calls under it are synchronous on one worker — and recorded once per
         // track against the SOURCE rate, for the track's first extractor run only: a downmix or transcode retry would put a
@@ -29144,10 +29190,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (waited != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
+                    Interlocked.Increment(ref _preResampleFellBackCount);
                     if (waited == SubprocessWait.Outcome.Stalled)
-                        Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s, after {sw.Elapsed.TotalSeconds:F0} s); analyzing the original  [{shown}]");
+                        LogNote($"  NOTE: resample to 44.1 kHz stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s, after {sw.Elapsed.TotalSeconds:F0} s); analyzing the original  [{shown}]");
                     else if (waited == SubprocessWait.Outcome.Overran)
-                        Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz stopped after {sw.Elapsed.TotalSeconds:F0} s — longer than the track could last; analyzing the original  [{shown}]");
+                        LogNote($"  NOTE: resample to 44.1 kHz stopped after {sw.Elapsed.TotalSeconds:F0} s — longer than the track could last; analyzing the original  [{shown}]");
                     try { File.Delete(tempPath); } catch { }
                     return null;
                 }
@@ -29160,12 +29207,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     return tempPath;
                 }
                 var stderr = stderrTask.Wait(5000) ? stderrTask.Result : "";
-                Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz failed (exit {proc.ExitCode}); analyzing the original  [{shown}] {stderr.Substring(0, Math.Min(200, stderr.Length)).Trim()}");
+                Interlocked.Increment(ref _preResampleFellBackCount);
+                LogNote($"  NOTE: resample to 44.1 kHz failed (exit {proc.ExitCode}); analyzing the original  [{shown}] {stderr.Substring(0, Math.Min(200, stderr.Length)).Trim()}");
                 try { File.Delete(tempPath); } catch { }
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"  WARNING: resample to 44.1 kHz failed ({ex.Message}); analyzing the original  [{shown}]");
+                Interlocked.Increment(ref _preResampleFellBackCount);
+                LogNote($"  NOTE: resample to 44.1 kHz failed ({ex.Message}); analyzing the original  [{shown}]");
                 try { File.Delete(tempPath); } catch { }
             }
             finally
@@ -29220,7 +29269,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (spools && edgesProfile == null)
                 {
                     try { if (File.Exists(tempJson)) File.Delete(tempJson); } catch { }
-                    if (tempLink != null) { try { RetryDelete(tempLink); } catch (Exception ex) { Console.Error.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); } }
+                    if (tempLink != null) { try { RetryDelete(tempLink); } catch (Exception ex) { LogNote($"  NOTE: failed to delete hardlink {tempLink}: {ex.Message}"); } }
                     if (spoolGrant.HasValue) _spoolBudget.Value.Release(spoolGrant.Value);
                     return (null, edgesPrepError ?? "could not write the extractor profile that carries the RAM spool cap");
                 }
@@ -29418,7 +29467,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (tempLink != null)
                 {
                     try { RetryDelete(tempLink); }
-                    catch (Exception ex) { Console.Error.WriteLine($"  WARNING: failed to delete hardlink {tempLink}: {ex.Message}"); }
+                    catch (Exception ex) { LogNote($"  NOTE: failed to delete hardlink {tempLink}: {ex.Message}"); }
                 }
                 _stageCleanup.RecordSince(cleanupStartedAt);
             }
