@@ -54,6 +54,7 @@ namespace Truedat
                 Alias(assert, Path.Combine(root, "alias"));
                 ReadOnlyLater(assert, Path.Combine(root, "readonly"));
                 Owner(assert, Path.Combine(root, "owner"));
+                Locator(assert, Path.Combine(root, "locator"));
                 Settings(assert);
             }
             catch (Exception ex) { assert(false, $"work folder: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -808,6 +809,68 @@ namespace Truedat
                 $"work owner (cli): a run of another library against the claimed folder exits 2, naming both folders (exit {exit})");
             assert(File.Exists(Path.Combine(lib3, "mbxmoods-errors.csv")) && !File.Exists(Path.Combine(shared, "mbxmoods-formats.csv")),
                 "work owner (cli): its working files stayed where they were and its report was not written into the other library's folder");
+        }
+
+        /// <summary>The hub utility's locator (hub review, item B; field names and kinds are a contract agreed with the hub): the writing
+        /// run that settles a work folder writes truedat-work-folder.json where store-result.json goes, before it moves anything,
+        /// rewrites it only when a field changes, and a reading run never writes it. And every store-result.json writer carries
+        /// workFolder — a --store-export run after the move as much as the scan.</summary>
+        static void Locator(Action<bool, string> assert, string root)
+        {
+            var lib = Path.Combine(root, "Library");
+            var work = Path.Combine(root, "elsewhere");
+            Directory.CreateDirectory(lib);
+            var catalog = Path.Combine(lib, "mbxmoods.json");
+            File.WriteAllText(catalog, "{\"version\":1,\"trackCount\":0,\"tracks\":{}}");
+            File.WriteAllText(Path.Combine(lib, "mbxmoods-errors.csv"), "e");
+            (int Exit, string Output) Child(string args)
+            {
+                var start = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = typeof(Program).Assembly.Location, WorkingDirectory = lib, Arguments = args,
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
+                };
+                using var child = System.Diagnostics.Process.Start(start)!;
+                child.StandardInput.Close();
+                var so = child.StandardOutput.ReadToEndAsync(); var se = child.StandardError.ReadToEndAsync();
+                if (!child.WaitForExit(120000)) { try { child.Kill(); } catch { } }
+                return (child.HasExited ? child.ExitCode : -1, so.GetAwaiter().GetResult() + se.GetAwaiter().GetResult());
+            }
+            var locator = Path.Combine(lib, "truedat-work-folder.json");
+
+            var first = Child("--no-config --no-store --moods \"" + catalog + "\" --snapshot --work-dir \"" + work + "\"");
+            var doc = File.Exists(locator) ? System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(locator)) : null;
+            assert(first.Exit == 0 && File.Exists(Path.Combine(work, "mbxmoods-errors.csv")), $"work locator: a first --snapshot settles the work folder and moves the working files (exit {first.Exit})");
+            assert(doc?["kind"]?.GetValue<string>() == "truedat-work-folder" && doc?["version"]?.GetValue<int>() == 1
+                   && doc?["catalogFolder"]?.GetValue<string>() == lib && doc?["workFolder"]?.GetValue<string>() == work
+                   && doc?["libraryId"]?.GetValue<string>() == global::Truedat.Store.StoreLocation.LibraryId(lib)
+                   && (doc?["writtenUtc"]?.GetValue<string>() ?? "").EndsWith("Z", StringComparison.Ordinal),
+                $"work locator: it writes truedat-work-folder.json where store-result.json goes, naming both folders ({(doc == null ? "absent" : doc.ToJsonString())})");
+            var written = doc?["writtenUtc"]?.GetValue<string>();
+            Child("--no-config --no-store --moods \"" + catalog + "\" --snapshot --work-dir \"" + work + "\"");
+            var again = File.Exists(locator) ? System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(locator))?["writtenUtc"]?.GetValue<string>() : null;
+            assert(written != null && again == written, $"work locator: a run whose fields are the same does not rewrite it ({written} / {again})");
+            File.Delete(locator);
+            Child("--no-config --no-store --moods \"" + catalog + "\" --stats --work-dir \"" + work + "\"");
+            assert(!File.Exists(locator), "work locator: a reading run never writes it");
+
+            // A store, then a --store-export run of its own: its record names the work folder too.
+            var store = Path.Combine(lib, "truedat.db");
+            var e = new TrackEntry
+            {
+                Features = new TrackFeatures { Artist = "A", Title = "t", Bpm = 120 },
+                LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('h', 64),
+            };
+            using (global::Truedat.Store.StoreLog.Quiet())
+                global::Truedat.Store.ImportCommand.ExecuteEntries(store, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\t.flac"] = e },
+                    @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+            var exported = Path.Combine(root, "exported.json");
+            var export = Child("--no-config --store \"" + store + "\" --store-export \"" + exported + "\" --work-dir \"" + work + "\"");
+            var recPath = Path.Combine(lib, global::Truedat.Store.StoreResultFile.FileName);
+            global::Truedat.Store.StoreResultFile? rec = null;
+            bool read = File.Exists(recPath) && global::Truedat.Store.StoreResult.TryRead(recPath, out rec);
+            assert(read && rec!.Verb == "store-export" && rec.WorkFolder == work,
+                $"work locator: a --store-export run's store-result.json carries workFolder (exit {export.Exit}, verb {(read ? rec!.Verb : "-")}, workFolder {(read ? rec!.WorkFolder ?? "absent" : "-")})");
         }
 
         /// <summary>The flag and the config key are one spelling, and a reset may ride with it.</summary>

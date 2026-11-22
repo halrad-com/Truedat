@@ -148,6 +148,55 @@ namespace Truedat
             return want;
         }
 
+        // ---- the hub utility's locator (hub review, item B) -----------------------------------------------------
+
+        /// <summary>Written where store-result.json goes, so the hub's utility finds a library's work folder without re-deriving the
+        /// rule. Field names and kind are a contract agreed with the hub.</summary>
+        internal const string LocatorFileName = "truedat-work-folder.json";
+        internal const string LocatorKind = "truedat-work-folder";
+
+        /// <summary>Write the locator into <paramref name="locatorDir"/> naming the catalog folder, the work folder actually used (the
+        /// catalog folder after a fallback) and the library id. Rewritten only when one of those changes — writtenUtc alone never
+        /// triggers a write. Called by a WRITING run as it settles its folder, before the move; a reading run never calls it. A folder
+        /// that does not exist gets none (the record is not written there either). Never throws; true when written.</summary>
+        internal static bool WriteLocator(string locatorDir, string catalogDir, string workFolder)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(locatorDir) || !Directory.Exists(locatorDir)) return false;
+                var path = Path.Combine(locatorDir, LocatorFileName);
+                var cat = Norm(catalogDir);
+                var work = Norm(workFolder);
+                var id = global::Truedat.Store.StoreLocation.LibraryId(cat);
+                if (File.Exists(path))
+                {
+                    try
+                    {
+                        var d = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path));
+                        if (d?["kind"]?.GetValue<string>() == LocatorKind && d?["version"]?.GetValue<int>() == 1
+                            && d?["catalogFolder"]?.GetValue<string>() == cat && d?["workFolder"]?.GetValue<string>() == work
+                            && d?["libraryId"]?.GetValue<string>() == id)
+                            return false;
+                    }
+                    catch (Exception) { /* unreadable: written fresh below */ }
+                }
+                var json = new System.Text.Json.Nodes.JsonObject
+                {
+                    ["kind"] = LocatorKind,
+                    ["version"] = 1,
+                    ["catalogFolder"] = cat,
+                    ["workFolder"] = work,
+                    ["libraryId"] = id,
+                    ["writtenUtc"] = DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+                }.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                File.WriteAllText(tmp, json);
+                Program.AtomicReplace(tmp, path);
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+
         // ---- the owner marker (hub review, item A) ------------------------------------------------------------
 
         /// <summary>The file a work folder that is not its catalog folder carries, naming the catalog folder it belongs to. A dot name:

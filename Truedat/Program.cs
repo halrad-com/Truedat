@@ -3835,6 +3835,7 @@ namespace Truedat
                     Environment.ExitCode = 1;
                     return;
                 }
+                SettleWorkForStoreVerb(importCatalog, storePath);   // item B: its record carries workFolder
                 Environment.ExitCode = global::Truedat.Store.ImportCommand.Run(new global::Truedat.Store.ImportOptions
                 {
                     StorePath = storePath,
@@ -3848,6 +3849,7 @@ namespace Truedat
             }
             if (storeExportPath != null)
             {
+                SettleWorkForStoreVerb(_storeCatalogPath, storePath);   // item B: its record carries workFolder
                 Environment.ExitCode = global::Truedat.Store.ExportCommand.Run(new global::Truedat.Store.ExportOptions
                 {
                     StorePath = storePath, OutPath = storeExportPath, ExportRoot = storeExportRoot, Audit = auditLog,
@@ -3883,11 +3885,13 @@ namespace Truedat
             }
             if (edgesExportMode)
             {
+                SettleWorkForStoreVerb(_storeCatalogPath, _storePath);   // item B: its record carries workFolder
                 Environment.ExitCode = RunEdgesExport(_storePath, edgesExportPath ?? _edgesCompanionPath, _edgeSettings);
                 return;
             }
             if (edgeArraysDropMode)
             {
+                SettleWorkForStoreVerb(_storeCatalogPath, _storePath);   // item B: its record carries workFolder
                 Environment.ExitCode = RunEdgeArraysDrop(_storePath, dryRun);
                 return;
             }
@@ -12315,6 +12319,7 @@ namespace Truedat
             IReadOnlyDictionary<string, string>? remapSources = null)
         {
             var store = _storePath!;
+            SettleWorkForStoreVerb(catalogPath, store);   // item B: every record writer carries workFolder
             var rec = global::Truedat.Store.StoreResult.Begin(hubVerb);
             rec.Store = new global::Truedat.Store.StoreResultStore { Path = Path.GetFullPath(store), TruedatVersion = VersionInfo.Display };
             int Fail(string sentence, int exit)
@@ -13949,6 +13954,8 @@ namespace Truedat
                 {
                     WorkFolder.Begin(dir, out var note);
                     if (note != null) _workLines.Add(note);
+                    // The hub utility's locator (item B), BEFORE anything moves: the hub reads where the files went from here.
+                    if (WorkFolder.Current != null) WorkFolder.WriteLocator(RecordFolderFor(catalogPath), dir, WorkFolder.Current);
                     var report = WorkFolder.MoveExisting(catalogPath, _storePath);
                     var moved = WorkFolder.Describe(report);
                     if (moved != null) _workLines.Add(moved);
@@ -13994,6 +14001,41 @@ namespace Truedat
                 }
                 _workNames.Clear();
             }
+        }
+
+        /// <summary>The folder store-result.json goes to for this catalog — beside the store in force, else where
+        /// <c>StoreLocation.Resolve</c> puts this catalog's store (the same rule the record written without a store uses). The locator
+        /// (item B) is written there too, so the hub finds both in one place. Empty when it cannot be resolved.</summary>
+        static string RecordFolderFor(string catalogPath)
+        {
+            try
+            {
+                var at = !string.IsNullOrEmpty(_storePath) ? _storePath! : global::Truedat.Store.StoreLocation.Resolve(null, _storeDirOpt, catalogPath, out _);
+                return Path.GetDirectoryName(Path.GetFullPath(at)) ?? "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>A store verb that writes store-result.json settles its library's work folder first (item B: every record writer
+        /// carries <c>workFolder</c>), as any writing verb's first working-file path would. The catalog is the one the store serves:
+        /// the resolved store catalog, else the catalog beside the store. A store with neither — kept in a folder of its own — settles
+        /// nothing: that folder is not a catalog folder. A reading run (no first-use hook) settles nothing.</summary>
+        static void SettleWorkForStoreVerb(string? storeCatalog, string? storePath)
+        {
+            if (WorkFolder.BeginOnFirstUse == null) return;
+            string? catalog = storeCatalog;
+            if (string.IsNullOrEmpty(catalog) && !string.IsNullOrEmpty(storePath))
+            {
+                try
+                {
+                    var beside = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storePath!)) ?? ".", MoodsFileName);
+                    if (CatalogArchive.CatalogFiles(beside).Count > 0) catalog = beside;
+                }
+                catch { }
+            }
+            if (string.IsNullOrEmpty(catalog)) return;
+            BeginWork(catalog!);
+            ShowWork(Console.Error);
         }
 
         /// <summary>The catalog a writing verb works on in <paramref name="catalogDir"/>: the file <c>--moods</c> named when it is in that
