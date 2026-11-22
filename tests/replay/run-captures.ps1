@@ -43,7 +43,7 @@ try {
 
     Write-Host "replay: scanning fixtures (analysis codepaths)..."
     $moods = Join-Path $work "mbxmoods.json"
-    & $TruedatExe --file-list $list --moods $moods -p 2
+    & $TruedatExe --file-list $list --moods $moods --work-dir (Join-Path $work "work") -p 2
     if ($LASTEXITCODE -ne 0) { Fail2 "truedat scan failed (exit $LASTEXITCODE)" }
     if (-not (Test-Path $moods)) { Fail2 "scan produced no mbxmoods.json" }
 
@@ -188,11 +188,13 @@ try {
     $g1 = Join-Path $work "g1"; New-Item -ItemType Directory -Path $g1 | Out-Null
     $g1moods = Join-Path $g1 "mbxmoods.json"; $g1ex = Join-Path $g1 "mbxmoods-exclude.json"
     Write-ExFile $g1ex @(@{ kind = "file"; action = "exclude"; path = $f0 })
-    & $TruedatExe --file-list $list --moods $g1moods --exclusions $g1ex -p 2
+    # truedat writes its working files (the skip report among them) to a work folder; name it, so the gate reads the right one.
+    $g1work = Join-Path $g1 "work"
+    & $TruedatExe --file-list $list --moods $g1moods --exclusions $g1ex --work-dir $g1work -p 2
     $g1exit = $LASTEXITCODE
     $g1absent  = -not (LeafInMoods $g1moods $f0leaf)
     $g1scanned = ((MoodsTrackKeys $g1moods).Count -ge 1)
-    $g1skip = Join-Path $g1 "mbxmoods-skipped.csv"; $g1reason = $false
+    $g1skip = Join-Path $g1work "mbxmoods-skipped.csv"; $g1reason = $false
     if (Test-Path $g1skip) {
         $csv = Get-Content $g1skip -Raw
         $g1reason = ($csv -match [regex]::Escape($f0)) -and ($csv -match 'rule:\s*file=')
@@ -207,7 +209,7 @@ try {
         @{ kind = "file"; action = "exclude"; path = $f0 },
         @{ kind = "file"; action = "include"; path = $f0 }
     )
-    & $TruedatExe --file-list $list --moods $g2moods --exclusions $g2ex -p 2
+    & $TruedatExe --file-list $list --moods $g2moods --exclusions $g2ex --work-dir (Join-Path $g2 "work") -p 2
     $g2exit = $LASTEXITCODE
     $g2present = LeafInMoods $g2moods $f0leaf
     ExGate "G2 include-rescues" (($g2exit -eq 0) -and $g2present) "exit=$g2exit present=$g2present"
@@ -228,7 +230,7 @@ try {
     $g3dsd  = Join-Path $g3 "structural-skip.dsf"; New-Item -ItemType File -Path $g3dsd | Out-Null
     $g3list = Join-Path $g3 "files.txt"; @($g3real, $g3dsd) | Set-Content -Encoding UTF8 $g3list
     Write-ExFile $g3ex @(@{ kind = "folder"; action = "include"; pattern = (Join-Path $g3 "**") })
-    & $TruedatExe --file-list $g3list --moods $g3moods --exclusions $g3ex -p 2
+    & $TruedatExe --file-list $g3list --moods $g3moods --exclusions $g3ex --work-dir (Join-Path $g3 "work") -p 2
     $g3exit = $LASTEXITCODE
     $g3realIn = LeafInMoods $g3moods $f0leaf
     $g3dsdIn  = LeafInMoods $g3moods "structural-skip.dsf"
@@ -279,7 +281,7 @@ try {
     $g6 = Join-Path $work "g6"; New-Item -ItemType Directory -Path $g6 | Out-Null
     $g6moods = Join-Path $g6 "mbxmoods.json"; $g6ex = Join-Path $g6 "mbxmoods-exclude.json"
     Set-Content -Encoding UTF8 -Path $g6ex -Value '{ this is not valid json ]['
-    & $TruedatExe --file-list $list --moods $g6moods --exclusions $g6ex -p 2
+    & $TruedatExe --file-list $list --moods $g6moods --exclusions $g6ex --work-dir (Join-Path $g6 "work") -p 2
     $g6exit = $LASTEXITCODE
     $g6noMoods = -not (Test-Path $g6moods)
     ExGate "G6 broken-file-refuses" (($g6exit -eq 1) -and $g6noMoods) `
@@ -308,14 +310,15 @@ try {
         $g7list = Join-Path $g7 "files.txt"; @($g7file) | Set-Content -Encoding UTF8 $g7list
         # No exclusion file: the point is that a speech MARKER, absent an operator rule,
         # does not keep the file out of analysis.
-        & $TruedatExe --file-list $g7list --moods $g7moods --no-exclusions -p 2
+        $g7work = Join-Path $g7 "work"
+        & $TruedatExe --file-list $g7list --moods $g7moods --no-exclusions --work-dir $g7work -p 2
         $g7exit = $LASTEXITCODE
         $g7analyzed = LeafInMoods $g7moods "speech-marked.mp3"
         # And it must not have been skipped for a speech/podcast/marker reason. The regex
         # covers both the deleted code's literal "[skipped podcast] ... (file marker: ...)"
         # wording AND a reinstatement renamed to "speech", so a walk-back regression cannot
         # slip through by relabelling its skip message.
-        $g7skip = Join-Path $g7 "mbxmoods-skipped.csv"; $g7speechSkip = $false
+        $g7skip = Join-Path $g7work "mbxmoods-skipped.csv"; $g7speechSkip = $false
         if (Test-Path $g7skip) {
             $g7csv = Get-Content $g7skip -Raw
             if (($g7csv -match 'speech-marked\.mp3') -and ($g7csv -match '(?i)podcast|speech|marker')) { $g7speechSkip = $true }
@@ -405,12 +408,13 @@ try {
 "@
         Set-Content -Encoding UTF8 -Path $g9xml -Value $g9xmlText
         # Positional XML arg = MoodsMode (the default scan). Output lands at $g9\mbxmoods.json.
-        & $TruedatExe $g9xml --no-exclusions -p 2
+        $g9work = Join-Path $g9 "work"
+        & $TruedatExe $g9xml --no-exclusions --work-dir $g9work -p 2
         $g9exit = $LASTEXITCODE
         $g9moods = Join-Path $g9 "mbxmoods.json"
         $g9analyzed = LeafInMoods $g9moods "speech-marked.mp3"
         # Must not have been skipped for a speech/podcast label or marker reason.
-        $g9skip = Join-Path $g9 "mbxmoods-skipped.csv"; $g9speechSkip = $false
+        $g9skip = Join-Path $g9work "mbxmoods-skipped.csv"; $g9speechSkip = $false
         if (Test-Path $g9skip) {
             $g9csv = Get-Content $g9skip -Raw
             if (($g9csv -match 'speech-marked\.mp3') -and ($g9csv -match '(?i)podcast|speech|marker')) { $g9speechSkip = $true }
