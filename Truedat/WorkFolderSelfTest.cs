@@ -106,6 +106,8 @@ namespace Truedat
                 "mbxmoods-review.host7.json",
                 // A --chunk shard's catalog and sidecar: --merge-moods sources, never another run's working files.
                 "mbxmoods.host7.json", "mbxmoods.host7.mbxs",
+                // A write in progress belongs to the run writing it: a --restore's staged catalog, a save's temp file.
+                "mbxmoods.json.restore.tmp", "mbxmoods.json.tmp", "mbxmoods-errors.csv.tmp",
                 "mbxmoods-duplicates.json", "mbxmoods-duplicates.csv", "mbxmoods-duplicates.html", "mbxmoods-duplicates.manifest.json",
                 "mbxmoods-duplicates.verdicts.json", "mbxmoods-duplicate-losers.m3u8", "iTunes Music Library.xml", "truedat.exe",
                 "truedat.config.json", "desktop.ini", "song.mp3",

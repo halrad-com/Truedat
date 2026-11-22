@@ -636,15 +636,27 @@ namespace Truedat
                     var newer = Path.Combine(lib, ExclusionStore.FileName);
                     File.WriteAllText(newer, "a newer decision");
                     var catalogBefore = File.Exists(catalog) ? File.ReadAllBytes(catalog) : new byte[0];
-                    var blocked = RunChild(exe, lib, "--no-config --no-store --restore " + Q(resetZips[0]) + " --moods " + Q(catalog), out int blockedExit);
+                    // A working file an earlier build left beside the catalog, and a work folder elsewhere: a writing run would move
+                    // it. A refusal is not allowed to — it changes nothing, so the conflict is found before the folder is settled.
+                    var leftover = Path.Combine(lib, "mbxmoods-scan-2025-01-01-9.txt");
+                    File.WriteAllText(leftover, "a summary an earlier build left beside the catalog");
+                    var elsewhere = Path.Combine(root, "elsewhere");
+                    // Named by its bare file name, as the hints print it: finding it is what used to settle the work folder.
+                    var blocked = RunChild(exe, lib, "--no-config --no-store --restore " + Q(Path.GetFileName(resetZips[0])) + " --moods " + Q(catalog) + " --work-dir " + Q(elsewhere), out int blockedExit);
                     File.WriteAllText(Path.Combine(root, "restore-blocked.log"), blocked);
                     Check(blockedExit != 0 && blocked.Contains(newer), $"reset-restore-cli: a rule file that exists now stops the restore, named (exit {blockedExit})");
                     Check(File.ReadAllText(newer) == "a newer decision" && (File.Exists(catalog) ? File.ReadAllBytes(catalog) : new byte[0]).SequenceEqual(catalogBefore),
                         "reset-restore-cli: and nothing was changed — not the newer rule file, not the catalog");
-                    File.Delete(newer);
+                    Check(File.Exists(leftover) && !Directory.Exists(elsewhere) && !blocked.Contains("Work folder: moved"),
+                        "reset-restore-cli: the refusal moved nothing: the leftover working file is where it was and no work folder was made");
+                    Check(blocked.Contains("move yours back") && !blocked.Contains("copy mbxmoods.json"),
+                        "reset-restore-cli: the refusal's way to keep your rule files is one that works (move yours aside, restore, move yours back)");
+                    File.Delete(newer); File.Delete(leftover);
                     var back = RunChild(exe, lib, "--no-config --no-store --restore " + Q(resetZips[0]) + " --moods " + Q(catalog), out int backExit);
                     File.WriteAllText(Path.Combine(root, "restore-reset.log"), back);
                     Check(backExit == 0 && back.Contains("Restored:"), $"reset-restore-cli: --restore of the reset archive brings the catalog back (exit {backExit})");
+                    Check(!back.Contains("restore left it untouched") && back.Contains(Path.Combine(lib, ExclusionStore.FileName)),
+                        "reset-restore-cli: it says the rule files were put back, and not the snapshot's note that they were left in the archive");
                     Check(File.ReadAllBytes(catalog).SequenceEqual(clearedCatalog), "reset-restore-cli: the catalog is byte-identical to the one the reset archived");
                     Check(rules.All(kv => File.Exists(Path.Combine(lib, kv.Key)) && File.ReadAllText(Path.Combine(lib, kv.Key)) == kv.Value),
                         "reset-restore-cli: and every rule file is back, byte for byte");
@@ -654,6 +666,31 @@ namespace Truedat
                     var backClear = RunChild(exe, lib, "--no-config --no-store --restore " + Q(clearZips[0]) + " --moods " + Q(catalog), out int backClearExit);
                     File.WriteAllText(Path.Combine(root, "restore-clear.log"), backClear);
                     Check(backClearExit == 0 && File.Exists(catalog) && File.ReadAllText(catalog) == OldCatalog, $"clear-restore-cli: --restore of the clear archive brings the old catalog back byte for byte (exit {backClearExit})");
+                }
+
+                // ---- --restore of a plain catalog named by its full path, into a library whose work folder no run has settled:
+                //      the restore stages the catalog as <catalog>.restore.tmp, and settling the folder must not take that file away.
+                {
+                    var plain = Path.Combine(root, "plain-copy.json");
+                    File.WriteAllBytes(plain, clearedCatalog);
+                    var fresh = Path.Combine(root, "elsewhere-plain");
+                    var plainOut = RunChild(exe, lib, "--no-config --no-store --restore " + Q(plain) + " --moods " + Q(catalog) + " --work-dir " + Q(fresh), out int plainExit);
+                    File.WriteAllText(Path.Combine(root, "restore-plain.log"), plainOut);
+                    Check(plainExit == 0 && File.Exists(catalog) && File.ReadAllBytes(catalog).SequenceEqual(clearedCatalog),
+                        $"restore-cli: a plain catalog restored by full path into a library with an unsettled work folder lands, byte for byte (exit {plainExit})");
+                }
+
+                // ---- --reset names a rule file in use that lives outside the library folder, which it does not take
+                {
+                    var farRules = Path.Combine(root, "rules-elsewhere", ExclusionStore.FileName);
+                    Directory.CreateDirectory(Path.GetDirectoryName(farRules)!);
+                    File.WriteAllText(farRules, "{\"schemaVersion\":1,\"rules\":[]}");
+                    var farOut = RunChild(exe, lib, common + " --reset --exclusions " + Q(farRules), out int farExit);
+                    File.WriteAllText(Path.Combine(root, "reset-far-rules.log"), farOut);
+                    var farLine = farOut.Split('\n').FirstOrDefault(l => l.Contains(farRules)) ?? "";
+                    Check(farExit == 2 && farLine.Contains("--exclusions") && farLine.Contains("not taken"),
+                        $"reset-cli: the confirmation says the --exclusions file outside the library is not taken ({farLine.Trim()})");
+                    Check(File.Exists(farRules), "reset-cli: and it is left alone");
                 }
 
                 if (analyzable)

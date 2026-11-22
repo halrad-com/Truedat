@@ -3600,26 +3600,36 @@ namespace Truedat
                 // A backup, snapshot or reset archive named by its file name alone, as every earlier build's hint printed it: those
                 // live in the library's work folder now (WorkFolder), so the name is looked for there and beside the catalog too.
                 var restoreCatalogGuess = ResolveMoodsCatalog(analyzeFileMoods, xmlPath, out _, includeMarkerScan: false);
-                restoreArchivePath = FindArchiveByName(restoreArchivePath, restoreCatalogGuess);
                 // A --reset archive holds the operator's own files (exclusion rules, apply-result.json, duplicate verdicts); they go
                 // back beside the catalog, byte for byte — but never over one that exists now, which may be a newer decision. That
-                // is checked here, before anything is replaced, and the run stops naming each one.
-                var ruleEntries = !string.IsNullOrEmpty(restoreArchivePath) && File.Exists(restoreArchivePath!)
-                    ? ResetCommand.RuleEntries(restoreArchivePath!) : new List<string>();
+                // is checked FIRST, as a reading run would look (work folder, then beside the catalog), with nothing settled: a
+                // refusal changes nothing, and settling the work folder moves an earlier build's working files.
+                var firstUse = WorkFolder.BeginOnFirstUse;
+                WorkFolder.BeginOnFirstUse = null;
+                List<string> ruleEntries;
                 string? ruleDir = restoreCatalogGuess != null ? Path.GetDirectoryName(Path.GetFullPath(restoreCatalogGuess)) : null;
-                if (ruleEntries.Count > 0 && ruleDir != null)
+                try
                 {
-                    var inTheWay = ResetCommand.RuleConflicts(ruleEntries, ruleDir);
+                    var located = FindArchiveByName(restoreArchivePath, restoreCatalogGuess);
+                    ruleEntries = !string.IsNullOrEmpty(located) && File.Exists(located!)
+                        ? ResetCommand.RuleEntries(located!) : new List<string>();
+                    var inTheWay = ruleEntries.Count > 0 && ruleDir != null ? ResetCommand.RuleConflicts(ruleEntries, ruleDir) : new List<string>();
                     if (inTheWay.Count > 0)
                     {
-                        Console.Error.WriteLine($"Error: {restoreArchivePath} holds your rule files, and putting them back would write over {(inTheWay.Count == 1 ? "this one" : "these")}, which may be a newer decision. Nothing was changed.");
+                        Console.Error.WriteLine($"Error: {located} holds your rule files, and putting them back would write over {(inTheWay.Count == 1 ? "this one" : "these")}, which may be a newer decision. Nothing was changed.");
                         foreach (var p in inTheWay) Console.Error.WriteLine("  " + p);
                         Console.Error.WriteLine("  To restore the archive's copies, move those files somewhere else (or delete them) and run --restore again.");
-                        Console.Error.WriteLine("  To keep yours, take the catalog alone out of the archive: copy mbxmoods.json from it and run --restore on that copy.");
+                        Console.Error.WriteLine("  To keep yours: move them somewhere else, run --restore again, then move yours back over the restored copies.");
                         Environment.ExitCode = 1;
                         return;
                     }
                 }
+                finally { WorkFolder.BeginOnFirstUse = firstUse; }
+                // Now a writing run: settle the library's work folder (moving an earlier build's working files) BEFORE anything is
+                // staged — the restore's own temp file must not appear beside the catalog first — and look the archive up again,
+                // since a bare-named archive an earlier build left beside the catalog has just moved with the rest.
+                if (firstUse != null && restoreCatalogGuess != null) { BeginWork(restoreCatalogGuess); ShowWork(Console.Error); }
+                restoreArchivePath = FindArchiveByName(restoreArchivePath, restoreCatalogGuess);
                 int RestoreRulesAfter(int restoreExit, string destCatalogPath)
                 {
                     if (restoreExit != 0 || ruleEntries.Count == 0) return restoreExit;
@@ -11703,6 +11713,15 @@ namespace Truedat
             catch { return archive; }
         }
 
+        /// <summary>The archive carries the exclusion file and this restore leaves it there — a snapshot's bundled copy. A reset
+        /// archive's rule files are put back (<see cref="ResetCommand.RuleEntries"/>), so the snapshot's note would say the
+        /// opposite of what happened.</summary>
+        static bool SnapshotKeepsExclude(string archivePath)
+        {
+            try { return CatalogArchive.ArchiveContainsExclude(archivePath) && ResetCommand.RuleEntries(archivePath).Count == 0; }
+            catch { return false; }
+        }
+
         static int RunRestore(string archivePath, string destCatalog)
         {
             Console.WriteLine("=== Restore Mode ===");
@@ -11777,8 +11796,7 @@ namespace Truedat
                     Console.WriteLine("  The archive also holds a store, which was not restored: run the same command with --store to restore it and publish the catalog from it.");
             }
             catch { }
-            if (CatalogArchive.SniffFile(archivePath) == CatalogArchive.CatalogFormat.Zip
-                && CatalogArchive.ArchiveContainsExclude(archivePath))
+            if (CatalogArchive.SniffFile(archivePath) == CatalogArchive.CatalogFormat.Zip && SnapshotKeepsExclude(archivePath))
                 Console.WriteLine($"Note: the archive also contains {CatalogArchive.ExcludeEntryName}; restore left it untouched. Extract it manually to roll policy back too.");
             return 0;
         }
@@ -11849,7 +11867,7 @@ namespace Truedat
 
             Console.WriteLine($"Published: {rep.Entries:N0} entries at generation {rep.Generation} "
                 + $"(catalog + sidecar{(rep.Companion ? " + " + global::Truedat.Edges.EdgeCompanion.FileName : "")})");
-            if (CatalogArchive.ArchiveContainsExclude(archivePath))
+            if (SnapshotKeepsExclude(archivePath))
                 Console.WriteLine($"Note: the archive also contains {CatalogArchive.ExcludeEntryName}; restore left it untouched. Extract it manually to roll policy back too.");
             global::Truedat.Store.StoreResult.Write(storePath, rec, 0, global::Truedat.Store.StoreResult.OutcomeCompleted);
             return 0;
@@ -26147,6 +26165,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     foreach (var p in operatorFiles) Console.WriteLine("    " + p);
                 else
                     Console.WriteLine("    (none found for this library)");
+                // A rule file this run uses from somewhere else is not the library's, and "full reset" must not read as covering it.
+                if (!string.IsNullOrEmpty(_exclusionsPath))
+                {
+                    string farRules = Path.GetFullPath(_exclusionsPath!);
+                    string catDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
+                    if (File.Exists(farRules) && !string.Equals(Path.GetDirectoryName(farRules), catDir, StringComparison.OrdinalIgnoreCase))
+                        Console.WriteLine($"  The exclusion rules named by --exclusions are outside the library folder and are not taken: {farRules}");
+                }
             }
 
             // 6. Nothing held by another program — asked before the confirmation, so nobody confirms a run that cannot start.

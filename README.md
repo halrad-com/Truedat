@@ -187,8 +187,9 @@ What to expect:
   so the store is restored and the catalog published from it (without it the run restores the catalog
   alone and tells you the archive holds a store). A reset archive's rule files are put back beside the
   catalog as well, byte for byte; if one of them exists now, the restore stops first, names it and
-  changes nothing — move it aside to take the archive's copy. The error and skip lists and the review
-  records are in the zip as well and are not put back.
+  changes nothing — move it aside to take the archive's copy, or, to keep yours, move it aside, restore,
+  and move yours back over the restored copy. The error and skip lists and the review records are in
+  the zip as well and are not put back.
 
 ### Scanning a folder (`--folder`)
 

@@ -266,6 +266,9 @@ namespace Truedat
         {
             if (string.IsNullOrEmpty(name)) return false;
             if (name.StartsWith(".truedat-work-probe-", StringComparison.Ordinal)) return false;
+            // A write in progress (a --restore's staged catalog, any save's temp file) belongs to the run writing it: moving it
+            // out from under that run is what made a --restore by full path fail to install its catalog.
+            if (name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) return false;
             switch (Program.ClassifySideFile(name, catalogName, sidecarName, companionName, storeName))
             {
                 case Program.SideFile.None: return false;              // not ours
