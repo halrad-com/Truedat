@@ -16,6 +16,7 @@ namespace Truedat
             TestLeftovers(assert);
             TestOtherRunning(assert);
             TestFileInUse(assert);
+            TestLiveRunKept(assert);
         }
 
         static string NewRoot() => Path.Combine(SelfTestTemp.Root, "selftesttemp-" + Guid.NewGuid().ToString("N"));
@@ -77,5 +78,39 @@ namespace Truedat
             }
             finally { Remove(root); }
         }
-    }
+            /// <summary>The hub-side EV6.2 review: two self-test runs at once. The second's cleanup must never remove the first's live
+        /// fixtures - it used to decide once whether another truedat was running, then delete everything in the shared folder,
+        /// and a run that started in between had its fixtures removed.</summary>
+        static void TestLiveRunKept(Action<bool, string> assert)
+        {
+            var root = NewRoot();
+            try
+            {
+                Directory.CreateDirectory(root);
+                using (var first = SelfTestTemp.Begin(root, () => false, privateRun: true))
+                {
+                    var fixture = Path.Combine(first.Root, "fixture-a");
+                    Directory.CreateDirectory(fixture);
+                    File.WriteAllText(Path.Combine(fixture, "mbxmoods.json"), "{}");
+                    assert(first.Root != root && first.Root.StartsWith(root, StringComparison.OrdinalIgnoreCase),
+                        $"selftest-temp: a run makes its fixtures in a folder of its own ({first.Root})");
+                    // The second run sees no other truedat (the check can be wrong either way) and cleans up.
+                    using (var second = SelfTestTemp.Begin(root, () => false, privateRun: true))
+                    {
+                        assert(File.Exists(Path.Combine(fixture, "mbxmoods.json")),
+                            "selftest-temp: a second run's cleanup leaves a live run's fixtures alone, whatever it thinks is running");
+                        assert(second.Root != first.Root, "selftest-temp: each run has its own folder");
+                    }
+                }
+                // The first run has ended, keeping its fixture (as a failed test does): the next run removes it.
+                using (var third = SelfTestTemp.Begin(root, () => false, privateRun: true))
+                {
+                    int left = 0;
+                    foreach (var d in Directory.GetDirectories(root)) if (!string.Equals(d, third.Root, StringComparison.OrdinalIgnoreCase)) left++;
+                    assert(left == 0, $"selftest-temp: what an ended run kept is removed by the next ({left} folder(s) left)");
+                }
+            }
+            finally { Remove(root); }
+        }
+}
 }

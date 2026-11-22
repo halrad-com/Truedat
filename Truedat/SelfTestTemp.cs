@@ -10,23 +10,54 @@ namespace Truedat
     ///
     /// Every test deletes its own fixture when it ends, but some are kept on purpose (a failed CLI test keeps its library so
     /// it can be looked at) and a run that crashes or is killed deletes nothing. So the NEXT run removes whatever earlier runs
-    /// left, when it starts. Several sessions can run the self-test on one machine at once and they share this folder, so a
-    /// run removes nothing while any other truedat process is running: every self-test is one, whichever build it is, and a
-    /// scan that happens to be running only puts the cleanup off to the next run. Two runs starting together each see the
-    /// other, so neither removes anything.
+    /// left, when it starts. Several sessions can run the self-test on one machine at once, so each run makes its fixtures in
+    /// a folder of its own (run-&lt;pid&gt;-&lt;id&gt;) and holds an owner file in it open for as long as it runs; another run's
+    /// cleanup removes that folder only once nothing holds the owner file - a crash or a kill releases it. Loose files that
+    /// builds from before this left directly in the shared folder are removed only while no other truedat is running.
     /// </summary>
     internal static class SelfTestTemp
     {
-        internal static string Root => Path.Combine(Path.GetTempPath(), ".truedat-selftest");
+        static string SharedRoot => Path.Combine(Path.GetTempPath(), ".truedat-selftest");
+        static string? _runRoot;
+        /// <summary>Where this run's fixtures go: its own folder once the self-test has begun, the shared folder before.</summary>
+        internal static string Root => _runRoot ?? SharedRoot;
 
-        internal static RunFolder Begin() => Begin(Root, OtherTruedatRunning);
+        internal static RunFolder Begin()
+        {
+            var run = Begin(SharedRoot, OtherTruedatRunning, privateRun: true);
+            _runRoot = run.Root;
+            return run;
+        }
 
-        internal static RunFolder Begin(string root, Func<bool> otherTruedatRunning)
+        /// <summary>Folders a run makes for itself are named with this prefix and hold <see cref="OwnerFile"/> open for the run's
+        /// life (the hub-side EV6.2 review: a check of "is another truedat running" made once could not protect a run that started
+        /// after it).</summary>
+        internal const string RunPrefix = "run-", OwnerFile = ".owner";
+
+        internal static RunFolder Begin(string root, Func<bool> otherTruedatRunning, bool privateRun = false)
         {
             Directory.CreateDirectory(root);
-            var run = new RunFolder(root);
+            RunFolder run;
+            if (privateRun)
+            {
+                var own = Path.Combine(root, RunPrefix + Process.GetCurrentProcess().Id + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                Directory.CreateDirectory(own);
+                var owner = new FileStream(Path.Combine(own, OwnerFile), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                run = new RunFolder(own, root, owner);
+            }
+            else run = new RunFolder(root, root, null);
             run.RemoveLeftovers(otherTruedatRunning());
             return run;
+        }
+
+        /// <summary>A run folder whose owner file can be opened alone belongs to a run that has ended.</summary>
+        static bool RunHasEnded(string runFolder)
+        {
+            var owner = Path.Combine(runFolder, OwnerFile);
+            if (!File.Exists(owner)) return true;
+            try { using (new FileStream(owner, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) return true; }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
         }
 
         /// <summary>Any truedat process other than this one — a self-test of any build, or anything else truedat is doing.</summary>
@@ -41,8 +72,11 @@ namespace Truedat
 
         internal sealed class RunFolder : IDisposable
         {
-            internal RunFolder(string root) { Root = root; }
+            readonly string _shared;
+            FileStream? _owner;
+            internal RunFolder(string root, string shared, FileStream? owner) { Root = root; _shared = shared; _owner = owner; }
 
+            /// <summary>This run's own folder (or the shared one, for a run that did not ask for its own).</summary>
             internal string Root { get; }
             /// <summary>Another truedat process was running when this run started, so nothing was removed.</summary>
             internal bool OtherRunning { get; private set; }
@@ -54,13 +88,13 @@ namespace Truedat
             internal void RemoveLeftovers(bool otherRunning)
             {
                 OtherRunning = otherRunning;
-                if (otherRunning)
+                foreach (var entry in Directory.GetFileSystemEntries(_shared))
                 {
-                    Console.WriteLine($"  Self-test temp: another truedat is running, so what earlier runs left in {Root} stays for the next run.");
-                    return;
-                }
-                foreach (var entry in Directory.GetFileSystemEntries(Root))
-                {
+                    if (string.Equals(entry, Root, StringComparison.OrdinalIgnoreCase)) continue;   // this run's own folder
+                    // A run's own folder goes only when that run has ended: its owner file is the proof, not a guess about what is
+                    // running. Anything else is what an older build left loose, removed only when no other truedat is running.
+                    bool runFolder = Path.GetFileName(entry).StartsWith(RunPrefix, StringComparison.Ordinal) && Directory.Exists(entry);
+                    if (runFolder ? !RunHasEnded(entry) : otherRunning) continue;
                     try
                     {
                         if (Directory.Exists(entry)) Directory.Delete(entry, true); else File.Delete(entry);
@@ -68,7 +102,8 @@ namespace Truedat
                     }
                     catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { StillThere.Add(entry); }
                 }
-                if (Removed > 0) Console.WriteLine($"  Self-test temp: removed {Removed} left in {Root} by earlier runs.");
+                if (otherRunning) Console.WriteLine($"  Self-test temp: another truedat is running, so loose files earlier builds left in {_shared} stay for the next run.");
+                if (Removed > 0) Console.WriteLine($"  Self-test temp: removed {Removed} left in {_shared} by earlier runs.");
                 foreach (var s in StillThere) Console.WriteLine($"  Self-test temp: could not remove {s} (something still holds a file in it); the next run tries again.");
             }
 
@@ -76,7 +111,14 @@ namespace Truedat
             /// run's, or a leftover the next run removes).</summary>
             public void Dispose()
             {
+                if (_owner != null)
+                {
+                    _owner.Dispose(); _owner = null;
+                    try { File.Delete(Path.Combine(Root, OwnerFile)); } catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
+                }
                 try { Directory.Delete(Root); } catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
+                if (!string.Equals(Root, _shared, StringComparison.OrdinalIgnoreCase))
+                    try { Directory.Delete(_shared); } catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
             }
         }
     }
