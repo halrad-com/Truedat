@@ -538,6 +538,12 @@ with `.7`'s flags was run as the control):
 - The recipe run again end to end by `run-x8-build.sh`, with a new training run: a
   different file (`b52843df655584749db22ec469f4aa7d`), byte-identical to `.7` on the six
   exactly-repeating rows.
+- Rebuilt by `run-x8-build.sh` from the committed profile, into a fresh out dir: again a
+  different file (`491151e2504e2d01c818a3480f82e9c6`, 11 KB larger), again byte-identical to
+  `.7` on the six exactly-repeating rows. So the recipe reproduces the build's **values**,
+  not its bytes: a profile-guided, link-time-optimized build is not the same file twice.
+  Why was not investigated (the out dir and the `-flto` job count both differed from the
+  landed build's).
 
 **Measurement** (process CPU of each extractor run, the extractor's own profiler off):
 machine B, per pass, 325.5 / 325.2 / 334.9 s against `.7`'s 332.9 / 332.5 / 341.4 — 2.1 %
@@ -555,9 +561,8 @@ machine B, and on a CPU without it the binary dies before
 `main()` (exit `0xC000001D`, nothing printed), so shipping it would need a CPU check in
 truedat for 1.5 %. One extractor ships.
 
-Not verified: the full three-pass gate on a binary rebuilt by the script (the rebuild has
-the identity check above, not the noisy-row comparison); whether a rebuild from the
-committed profile is the same file byte for byte (only its values are claimed); any codec
+Not verified: the full three-pass gate on a binary rebuilt by the script (the two rebuilds
+have the identity check above, not the noisy-row comparison); any codec
 outside the two corpora (no APE, no multichannel, nothing above 48 kHz on machine B); a
 library scan.
 
