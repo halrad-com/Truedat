@@ -3611,9 +3611,15 @@ namespace Truedat
                 WorkFolder.BeginOnFirstUse = null;
                 List<string> ruleEntries;
                 string? ruleDir = restoreCatalogGuess != null ? Path.GetDirectoryName(Path.GetFullPath(restoreCatalogGuess)) : null;
+                string? located;
                 try
                 {
-                    var located = FindArchiveByName(restoreArchivePath, restoreCatalogGuess);
+                    // Review #8: the archive is resolved ONCE, to a full path, before the work folder is settled, and that path is the one
+                    // checked and the one opened. Settling used to move an archive handed in from beside the catalog into the work folder,
+                    // after which the path the run was given no longer existed (exit 2); a bare-name lookup after the move could also
+                    // switch archives between the conflict check and the restore.
+                    located = FindArchiveByName(restoreArchivePath, restoreCatalogGuess);
+                    if (!string.IsNullOrEmpty(located) && File.Exists(located!)) located = Path.GetFullPath(located!);
                     // Review #4: an entry whose name is not a plain file name (a backslash, a "..", a drive, a root) could steer a write
                     // out of the folder the restore writes into. truedat's own archives never hold one, so the WHOLE archive is refused
                     // here, before any catalog, store or rule file is touched.
@@ -3637,13 +3643,32 @@ namespace Truedat
                         Environment.ExitCode = 1;
                         return;
                     }
+                    // Review #11: a destination a rule file cannot be written to (a folder at its name) is found here, before the first
+                    // write — it used to be found after the store and the catalog were restored, and the record still said completed, exit 0.
+                    var blocked = ruleEntries.Count > 0 && ruleDir != null ? ResetCommand.RuleDestinationsBlocked(ruleEntries, ruleDir) : new List<string>();
+                    if (blocked.Count > 0)
+                    {
+                        var sentence = $"Error: {located} holds rule files that cannot be put back: {(blocked.Count == 1 ? "this name is" : "these names are")} taken by a folder (or their folder by a file). Nothing was changed.";
+                        Console.Error.WriteLine(sentence);
+                        foreach (var p in blocked) Console.Error.WriteLine("  " + p);
+                        Console.Error.WriteLine("  Move that folder out of the way and run --restore again.");
+                        if (_storePath != null)
+                        {
+                            var refused = global::Truedat.Store.StoreResult.Begin("restore");
+                            refused.Store = new global::Truedat.Store.StoreResultStore { Path = Path.GetFullPath(_storePath), TruedatVersion = VersionInfo.Display };
+                            global::Truedat.Store.StoreResult.Write(_storePath, refused, 1, global::Truedat.Store.StoreResult.OutcomeFailed, sentence.Substring(7));
+                        }
+                        Environment.ExitCode = 1;
+                        return;
+                    }
                 }
                 finally { WorkFolder.BeginOnFirstUse = firstUse; }
                 // Now a writing run: settle the library's work folder (moving an earlier build's working files) BEFORE anything is
-                // staged — the restore's own temp file must not appear beside the catalog first — and look the archive up again,
-                // since a bare-named archive an earlier build left beside the catalog has just moved with the rest.
+                // staged — the restore's own temp file must not appear beside the catalog first. The archive this run was handed is kept
+                // where it is (review #8), and is the one restored: no second lookup by name.
+                if (!string.IsNullOrEmpty(located) && File.Exists(located!)) WorkFolder.Keep(located!);
                 if (firstUse != null && restoreCatalogGuess != null) { BeginWork(restoreCatalogGuess); ShowWork(Console.Error); }
-                restoreArchivePath = FindArchiveByName(restoreArchivePath, restoreCatalogGuess);
+                restoreArchivePath = !string.IsNullOrEmpty(located) && File.Exists(located!) ? located : FindArchiveByName(restoreArchivePath, restoreCatalogGuess);
                 int RestoreRulesAfter(int restoreExit, string destCatalogPath)
                 {
                     if (restoreExit != 0 || ruleEntries.Count == 0) return restoreExit;
@@ -3674,7 +3699,9 @@ namespace Truedat
                         Environment.ExitCode = 1;
                         return;
                     }
-                    Environment.ExitCode = RestoreRulesAfter(RunStoreRestore(restoreArchivePath!, _storePath!, storeDest!), storeDest!);
+                    // Review #11: the rule files go back INSIDE the store restore, before its record is written, so the record says
+                    // what happened to every step this run was asked to do.
+                    Environment.ExitCode = RunStoreRestore(restoreArchivePath!, _storePath!, storeDest!, finish: () => RestoreRulesAfter(0, storeDest!));
                     return;
                 }
                 if (RefuseCatalogVerbWithStore(_storePath, "--restore", "restore")) return;   // store-v3 T06 Step 0
@@ -11889,7 +11916,7 @@ namespace Truedat
         /// when the restored bytes are older), and the record names both so the hub and the operator can see what
         /// happened. An archive whose store is damaged or from a newer schema is refused before anything is replaced.
         /// </summary>
-        internal static int RunStoreRestore(string archivePath, string storePath, string destCatalog)
+        internal static int RunStoreRestore(string archivePath, string storePath, string destCatalog, Func<int>? finish = null)
         {
             Console.WriteLine("=== Restore Mode (store) ===");
             Console.WriteLine($"  Archive:     {archivePath}");
@@ -11949,6 +11976,11 @@ namespace Truedat
                 + $"(catalog + sidecar{(rep.Companion ? " + " + global::Truedat.Edges.EdgeCompanion.FileName : "")})");
             if (SnapshotKeepsExclude(archivePath))
                 Console.WriteLine($"Note: the archive also contains {CatalogArchive.ExcludeEntryName}; restore left it untouched. Extract it manually to roll policy back too.");
+            // The rest of what this restore was asked to do (a reset archive's rule files) finishes BEFORE the record is written
+            // (review #11): the record is the hub's account of the whole run, and it said completed, exit 0, after the CLI exited 1.
+            int finished = finish?.Invoke() ?? 0;
+            if (finished != 0)
+                return Fail("Error: the store was restored and the files published from it, but the archive's rule files could not all be put back (see above).", finished);
             global::Truedat.Store.StoreResult.Write(storePath, rec, 0, global::Truedat.Store.StoreResult.OutcomeCompleted);
             return 0;
         }

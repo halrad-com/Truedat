@@ -407,6 +407,21 @@ namespace Truedat
             return dest;
         }
 
+        /// <summary>The rule destinations that are not a place a file can be written (review #11): a FOLDER at the rule file's name, or a
+        /// file where its folder goes (a Playlists that is a file). Asked before the first write of a restore, so a restore never
+        /// installs the store and the catalog and then fails on the rules.</summary>
+        internal static List<string> RuleDestinationsBlocked(IEnumerable<string> entries, string catalogDir)
+        {
+            var blocked = new List<string>();
+            foreach (var e in entries)
+            {
+                var dest = RuleDestination(catalogDir, e);
+                var parent = Path.GetDirectoryName(dest);
+                if (Directory.Exists(dest) || (parent != null && File.Exists(parent))) blocked.Add(dest);
+            }
+            return blocked;
+        }
+
         /// <summary>The rule files a restore would put back that exist now, as full paths. A restore never writes over a
         /// decision the operator has made since the archive; it names the file and stops.</summary>
         internal static List<string> RuleConflicts(IEnumerable<string> entries, string catalogDir)

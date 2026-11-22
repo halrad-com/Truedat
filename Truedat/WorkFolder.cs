@@ -66,6 +66,16 @@ namespace Truedat
         /// <summary>A work folder that could not be written this run but exists (review #15): the catalog folder takes the writes, and
         /// this one stays a READ source, so the ledgers an earlier run moved into it are still consulted.</summary>
         static readonly Dictionary<string, string> ReadAlso = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Files a run was HANDED (a --restore's archive): never moved, whatever they are called (review #8).</summary>
+        static readonly HashSet<string> Kept = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The move leaves this file where it is. For a run's own input, resolved to a full path before the work folder is
+        /// settled: a --restore handed an archive beside the catalog moved it into the work folder while settling, and then could not
+        /// open the path it was given (review #8).</summary>
+        internal static void Keep(string path)
+        {
+            try { var full = Path.GetFullPath(path); lock (Gate) Kept.Add(full); } catch { }
+        }
 
         /// <summary>The work folder of the library this run is working on, once one has been settled; null before that.
         /// This is the value <c>store-result.json</c> reports as <c>workFolder</c> (hub contract), so the hub's utility never
@@ -83,7 +93,7 @@ namespace Truedat
             {
                 _option = string.IsNullOrWhiteSpace(option) ? null : option;
                 _exeDir = string.IsNullOrWhiteSpace(exeDir) ? AppDomain.CurrentDomain.BaseDirectory : exeDir;
-                Settled.Clear(); Created.Clear(); Beginning.Clear(); ReadAlso.Clear();
+                Settled.Clear(); Created.Clear(); Beginning.Clear(); ReadAlso.Clear(); Kept.Clear();
                 Current = null; CurrentCatalogDir = null;
             }
         }
@@ -513,6 +523,8 @@ namespace Truedat
             {
                 var name = Path.GetFileName(src);
                 if (!IsWorkingFile(name, catalogName, sidecarName, companion, storeName)) continue;
+                bool kept; lock (Gate) kept = Kept.Contains(src);
+                if (kept) continue;   // a file this run was handed stays where it was given (review #8)
                 if (!Ensure(work)) return report;
                 var dest = Path.Combine(work, name);
                 try

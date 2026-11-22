@@ -34,7 +34,79 @@ namespace Truedat
             TestRuleRestore(assert);
             TestRestoreArchiveShapes(assert);
             TestPlaylistInPlaylistsFolder(assert);
+            TestRestoreInputAndRecord(assert);
             TestCli(assert);
+        }
+
+        /// <summary>Review #8: a restore given an archive beside the catalog, with a work folder elsewhere, moved its own input into the
+        /// work folder while settling it and then reported the archive missing (exit 2). Review #11: with a store in force and a
+        /// DIRECTORY where an archived rule file goes, the store was restored, the rule file failed, the run exited 1 — and
+        /// store-result.json said completed, exit 0. In child processes (a restore needs no extractor).</summary>
+        static void TestRestoreInputAndRecord(Action<bool, string> assert)
+        {
+            var exe = typeof(Program).Assembly.Location;
+            var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "restore-input-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            bool keep = false;
+            void Check(bool cond, string msg) { if (!cond) keep = true; assert(cond, msg + (cond ? "" : "  [fixture kept: " + root + "]")); }
+            const string Good = "{\"version\":1,\"generatedBy\":\"restore-input\",\"trackCount\":0,\"tracks\":{}}";
+            try
+            {
+                // ---- #8
+                {
+                    var lib = Path.Combine(root, "input", "Library");
+                    var work = Path.Combine(root, "input", "elsewhere");
+                    Directory.CreateDirectory(lib);
+                    var catalog = Path.Combine(lib, Program.MoodsFileName);
+                    File.WriteAllText(catalog, Good);
+                    var snap = Path.Combine(lib, "mbxmoods-snapshot-20261122.000000.zip");
+                    CatalogArchive.WriteSnapshot(catalog, null, snap, "selftest");
+                    File.WriteAllText(catalog, "{\"version\":1,\"generatedBy\":\"changed since the snapshot\",\"tracks\":{}}");
+                    var output = RunChild(exe, lib, "--no-config --no-store --restore " + Q(snap) + " --moods " + Q(catalog) + " --work-dir " + Q(work), out int exit);
+                    File.WriteAllText(Path.Combine(root, "input.log"), output);
+                    Check(exit == 0 && File.ReadAllText(catalog) == Good,
+                        $"restore-input #8: a restore by absolute path from the catalog folder, with a work folder elsewhere, restores (exit {exit})");
+                    Check(File.Exists(snap) && !File.Exists(Path.Combine(work, Path.GetFileName(snap))),
+                        "restore-input #8: and the archive it was handed is where it was - the move never takes a run's own input");
+                }
+
+                // ---- #11
+                {
+                    var src = Path.Combine(root, "record", "src");
+                    var lib = Path.Combine(root, "record", "Library");
+                    Directory.CreateDirectory(src); Directory.CreateDirectory(lib);
+                    var srcStore = Path.Combine(src, "truedat.db");
+                    var entry = new TrackEntry
+                    {
+                        Features = new TrackFeatures { Artist = "A", Title = "t", Bpm = 120 },
+                        LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string('h', 64),
+                    };
+                    using (global::Truedat.Store.StoreLog.Quiet())
+                        global::Truedat.Store.ImportCommand.ExecuteEntries(srcStore, new Dictionary<string, TrackEntry>(PathComparer.Instance) { [@"D:\music\t.flac"] = entry },
+                            @"D:\music", "primary", true, "essentia", "x", "fixture", null, null);
+                    var packed = Path.Combine(src, "packed.db");
+                    using (global::Truedat.Store.StoreLog.Quiet()) global::Truedat.Store.StoreTransfer.VacuumInto(srcStore, packed);
+                    File.WriteAllText(Path.Combine(src, "mbxmoods.json"), Good);
+                    File.WriteAllText(Path.Combine(src, ExclusionStore.FileName), "{\"version\":1,\"rules\":[]}");
+                    var zip = Path.Combine(root, "record", "mbxmoods-reset-20261122-000001.zip");
+                    CatalogArchive.WriteZipBackup(new[] { (packed, "truedat.db"), (Path.Combine(src, "mbxmoods.json"), "mbxmoods.json"),
+                                                          (Path.Combine(src, ExclusionStore.FileName), ExclusionStore.FileName) }, zip, requireWholeDocuments: false);
+                    Directory.CreateDirectory(Path.Combine(lib, ExclusionStore.FileName));   // a directory where the rule file goes
+                    var store = Path.Combine(lib, "truedat.db");
+                    var catalog = Path.Combine(lib, Program.MoodsFileName);
+                    var output = RunChild(exe, lib, "--no-config --store " + Q(store) + " --restore " + Q(zip) + " --moods " + Q(catalog), out int exit);
+                    File.WriteAllText(Path.Combine(root, "record.log"), output);
+                    Check(exit == 1, $"restore-record #11: a directory where an archived rule file goes fails the restore (exit {exit})");
+                    var recPath = Path.Combine(lib, global::Truedat.Store.StoreResultFile.FileName);
+                    global::Truedat.Store.StoreResultFile? rec = null;
+                    bool read = File.Exists(recPath) && global::Truedat.Store.StoreResult.TryRead(recPath, out rec);
+                    Check(read && rec!.Outcome == global::Truedat.Store.StoreResult.OutcomeFailed && rec.ExitCode == 1,
+                        $"restore-record #11: and store-result.json says so - outcome failed, exit code 1 ({(read ? rec!.Outcome + "/" + rec.ExitCode : "no record")})");
+                    Check(!File.Exists(store) && !File.Exists(catalog),
+                        "restore-record #11: the destination is checked before the first write - neither the store nor the catalog was put in place");
+                }
+            }
+            catch (Exception ex) { keep = true; assert(false, "restore-input: threw " + ex.GetType().Name + ": " + ex.Message + "  [fixture kept: " + root + "]"); }
+            finally { if (!keep) { try { Directory.Delete(root, true); } catch { } } }
         }
 
         /// <summary>Review #10: the scan finds the exclusion playlist beside the library OR in its Playlists folder (PlaylistReader.Discover),
