@@ -19,8 +19,8 @@ namespace Truedat
     /// <c>--clear</c> (operator 2026-11-21: "clear keeps what you have but clears the truedat db") keeps the operator's own
     /// files — the exclusion rules, <c>apply-result.json</c>, the duplicate verdicts — and carries the review list's ignore
     /// decisions into a fresh list ("give me a clean slate but i dont want to resetup how its working now"). <c>--reset</c>
-    /// ("reset is a full reset") takes all of that too. Both keep the config file, the field registry, snapshots and every
-    /// earlier clear or reset archive.
+    /// ("reset is a full reset") takes all of that too, and the config file (operator 2026-11-22: "im not seeing a reset reset the
+    /// truedat config"). Both keep the field registry, snapshots and every earlier clear or reset archive.
     ///
     /// What makes them safe to offer: nothing is removed until the archive has been written and read back; a file another
     /// program holds stops the run before the archive is written; and the scan entry refuses to begin unless it can also
@@ -60,7 +60,7 @@ namespace Truedat
             "exclusions", "no-exclusions", "exclude-playlist", "accept-flac-tag-drift",
             "retry-errors", "refresh", "refresh-features", "refresh-smfm", "refresh-authenticity", "refresh-chroma",
             "?", "h", "help", "version", "v",   // these print and exit before any scan, so nothing is reset beside them
-            "store", "store-dir", "work-dir", "no-store", "edges", "no-edges", "edge-arrays", "no-edge-arrays",
+            "store", "store-dir", "no-store", "edges", "no-edges", "edge-arrays", "no-edge-arrays",
             "publish", "no-publish", "split-mb", "keep-backups", "scan-summary", "fixup-after-scan",
         };
 
@@ -100,9 +100,9 @@ namespace Truedat
 
         /// <summary>
         /// THE keep-list: does <paramref name="verb"/> leave this file where it is? Both keep a snapshot somebody took on
-        /// purpose, every earlier clear or reset archive (neither verb swallows a previous one), the config file and the
-        /// field registry (they belong to the exe, which may serve several libraries, and say how the scan after runs), and
-        /// the exclusion file's lock. <c>--clear</c> also keeps the operator's own files (<see cref="IsOperatorFile"/>).
+        /// purpose, every earlier clear or reset archive (neither verb swallows a previous one), the field registry and the
+        /// exclusion file's lock. <c>--clear</c> also keeps the operator's own files (<see cref="IsOperatorFile"/>) and the config
+        /// file; <c>--reset</c> takes the config file too (<see cref="ConfigToTake"/> — it lives beside the exe, not the catalog).
         /// Everything else truedat wrote for the library is archived, then removed.
         /// </summary>
         internal static bool Keeps(Verb verb, string name)
@@ -111,9 +111,26 @@ namespace Truedat
             bool Starts(string prefix) => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
             bool Is(string other) => string.Equals(name, other, StringComparison.OrdinalIgnoreCase);
             if (Starts("mbxmoods-snapshot-") || Starts(ArchivePrefix) || Starts(ClearArchivePrefix)) return true;
-            if (Is("mbxmoods-schema.json") || Is(TruedatConfig.FileName) || IsRulesLock(name)) return true;
-            return verb == Verb.Clear && IsOperatorFile(name);
+            if (Is("mbxmoods-schema.json") || IsRulesLock(name)) return true;
+            return verb == Verb.Clear && (IsOperatorFile(name) || Is(TruedatConfig.FileName));
         }
+
+        /// <summary>The config file's name inside a reset archive. Put back beside the exe by --restore.</summary>
+        internal const string ConfigEntryName = "config/" + TruedatConfig.FileName;
+
+        /// <summary>The config file this run's verb takes, or null: <c>--reset</c> takes the one beside the exe when it exists, unless
+        /// the run was told not to touch it (<c>--no-config</c>: not read, so not taken). <c>--clear</c> never takes it.</summary>
+        internal static string? ConfigToTake(Verb verb, bool noConfig, string exeDir)
+        {
+            if (verb != Verb.Reset || noConfig) return null;
+            var path = Path.Combine(exeDir, TruedatConfig.FileName);
+            return File.Exists(path) ? path : null;
+        }
+
+        /// <summary>Where a restore puts the config file back: beside the exe this restore runs from.</summary>
+        internal static string ConfigDestination => Path.Combine(ConfigDirForTest ?? AppDomain.CurrentDomain.BaseDirectory, TruedatConfig.FileName);
+        /// <summary>Self-test seam: the folder a restore puts the config file back into. Null in production (beside the exe).</summary>
+        internal static string? ConfigDirForTest;
 
         internal enum Confirmation { Confirmed, Declined, NotAsked }
 
@@ -153,7 +170,7 @@ namespace Truedat
         /// a store kept in another folder brings that folder's store files under <c>store/</c>; the review ledger, when it
         /// lives in the hub's review folder, comes as <c>review/</c> — and only the ledger, because the other manifests there
         /// belong to other verbs.</summary>
-        internal static List<(string Path, string EntryName)> Collect(Verb verb, string catalogPath, string? storePath, string? reviewLedgerPath)
+        internal static List<(string Path, string EntryName)> Collect(Verb verb, string catalogPath, string? storePath, string? reviewLedgerPath, string? configPath = null)
         {
             var files = new List<(string Path, string EntryName)>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -188,14 +205,11 @@ namespace Truedat
                 if (File.Exists(p) && !Keeps(verb, name)) Add(p, PlaylistReader.PlaylistsFolder + "/" + name);
             }
 
-            // The work folder (WorkFolder): the working files truedat wrote for this library — the same classifier, narrowed to
-            // what IS a working file, because the work folder can be the exe's own folder, where the exe, the config file and the
-            // field registry sit. Entries under work/, after the catalog folder's, so a name held in both folders never collides
-            // and the store a restore looks for (truedat.db) is the catalog folder's.
-            var workDir = WorkFolder.For(dir);
-            // By identity, not by name (review #14): a work folder that is the catalog folder through a junction would list every file twice.
-            if (!WorkFolder.SameEntry(workDir, dir) && Directory.Exists(workDir))
-                foreach (var f in Directory.GetFiles(workDir).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+            // The folder the EV6.2 build moved this library's working files into, when something is still there (a scan since would
+            // have moved them back): the same classifier, narrowed to what IS a working file, because that folder can be the exe's
+            // own. Entries under work/, after the catalog folder's, so a name held in both places never collides.
+            foreach (var old in WorkFolder.LegacyFolders(dir))
+                foreach (var f in Directory.GetFiles(old).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
                 {
                     var name = Path.GetFileName(f);
                     if (Keeps(verb, name)) continue;
@@ -222,6 +236,8 @@ namespace Truedat
 
             if (reviewLedgerPath != null && File.Exists(reviewLedgerPath))
                 Add(reviewLedgerPath, "review/" + Path.GetFileName(reviewLedgerPath));   // already listed when it sits beside the catalog
+            if (configPath != null && File.Exists(configPath) && !Keeps(verb, TruedatConfig.FileName))
+                Add(configPath, ConfigEntryName);
             return files;
         }
 
@@ -394,7 +410,8 @@ namespace Truedat
                 using var zip = ZipFile.OpenRead(archivePath);
                 if (zip.GetEntry(CatalogArchive.ManifestEntryName) != null) return names;
                 foreach (var e in zip.Entries)
-                    if ((IsLeafName(e.FullName) && IsOperatorFile(e.FullName)) || IsPlaylistsEntry(e.FullName)) names.Add(e.FullName);
+                    if ((IsLeafName(e.FullName) && IsOperatorFile(e.FullName)) || IsPlaylistsEntry(e.FullName)
+                        || string.Equals(e.FullName, ConfigEntryName, StringComparison.OrdinalIgnoreCase)) names.Add(e.FullName);
             }
             catch (Exception) { /* not a zip, or unreadable: the restore's own read reports it */ }
             return names;
@@ -449,6 +466,7 @@ namespace Truedat
         /// throws <see cref="InvalidDataException"/>.</summary>
         static string RuleDestination(string catalogDir, string name)
         {
+            if (string.Equals(name, ConfigEntryName, StringComparison.OrdinalIgnoreCase)) return ConfigDestination;   // beside the exe
             if (IsPlaylistsEntry(name))
             {
                 var folder = Path.GetFullPath(Path.Combine(catalogDir, PlaylistReader.PlaylistsFolder));

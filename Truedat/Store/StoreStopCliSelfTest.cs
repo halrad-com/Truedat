@@ -176,9 +176,7 @@ namespace Truedat.Store
 
         static void InvokeMain(string dir, string? catalog, string? store = null)
         {
-            // --work-dir pins the layout this test checks (working files beside the catalog in dir): Main runs in a PowerShell host
-            // here, whose base directory is PowerShell's own, so the default rule would aim at a folder nobody can write.
-            var args = new List<string> { "--no-config", "--" + global::Truedat.WorkFolder.Flag, dir, "--no-edges", "--allow-sleep", "--file-list", "-", "--stage-dir", Path.Combine(dir, "stage") };
+            var args = new List<string> { "--no-config", "--no-edges", "--allow-sleep", "--file-list", "-", "--stage-dir", Path.Combine(dir, "stage") };
             if (catalog != null) { args.Add("--moods"); args.Add(catalog); }
             if (store == null) args.Add("--no-store"); else { args.Add("--store"); args.Add(store); }
             typeof(Program).Assembly.EntryPoint!.Invoke(null, new object[] { args.ToArray() });

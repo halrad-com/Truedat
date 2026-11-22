@@ -108,10 +108,8 @@ the recorded ones. (The extractor on that branch is **not** current — it is MD
 
 ## Output Files
 
-The catalog, its sidecar, the edges file, the store and the `store-*.json` records are written beside the catalog, where
-a player reads them, and so are your exclusion rules. Everything else truedat writes — the error and skipped lists, scan
-summaries, the log, backups and archives — goes to its work folder: the folder with `truedat.exe` when that is the catalog
-folder or a folder inside it, otherwise `libraries\<library-id>\` under the exe's folder, or the folder `--work-dir` names.
+Everything truedat writes for a library is written beside its catalog: the catalog, its sidecar, the edges file, the
+store, the `store-*.json` records, the error and skipped lists, scan summaries, the log, backups and archives.
 
 ### Analysis Mode
 

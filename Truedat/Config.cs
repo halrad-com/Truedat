@@ -92,7 +92,6 @@ namespace Truedat
             new Setting { Key = "store-dir",       Kind = Kind.Text, Default = "beside catalog", Help = "where store files go" },
             // A directory, not a target (WorkFolder, operator 2026-11-21): where truedat's WORKING files go — error and skip lists, scan
             // summaries, logs, backups, archives. The hub's files and the operator's rules stay beside the catalog whatever this says.
-            new Setting { Key = "work-dir",        Kind = Kind.Text, Default = "beside the exe", Help = "where working files go (lists, summaries, logs, backups)" },
             // Standing policies, not targets (operator, 2026-10-12: "both of those should be config keys that can be set as
             // the default per instance"): WHICH store is still derived from the catalog the run is pointed at; these only say
             // that every scan on this instance also writes it, and folds edges. --no-store / --no-edges override for one run.

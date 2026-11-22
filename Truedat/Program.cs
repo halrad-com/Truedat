@@ -870,7 +870,7 @@ namespace Truedat
             Console.WriteLine("Backup & snapshot:");
             Console.WriteLine("  --snapshot [path]   Read-only: bundle the current catalog + a manifest (trackCount,");
             Console.WriteLine("                      content SHA-256) + mbxmoods-exclude.json into a restorable, double-");
-            Console.WriteLine("                      clickable ZIP (default mbxmoods-snapshot-<ts>.zip in the work folder).");
+            Console.WriteLine("                      clickable ZIP (default mbxmoods-snapshot-<ts>.zip beside the catalog).");
             Console.WriteLine("                      With a store in force the STORE rides along too — a consistent VACUUM INTO");
             Console.WriteLine("                      copy, safe to take while a scan reads it — so the archive restores the");
             Console.WriteLine("                      authority and not just the files derived from it.");
@@ -1029,11 +1029,6 @@ namespace Truedat
             Console.WriteLine("                      are kept once in mbxmoods.json.retired.<time>.zip and removed). Config key `publish`;");
             Console.WriteLine("                      --publish turns it back on for one run. Needs a hub that reads the store.");
             Console.WriteLine("  --store-dir <dir>   Relocate the per-library default (<dir>\\<library-id>\\truedat.db); also a config key.");
-            Console.WriteLine("  --work-dir <dir>    Where truedat's working files go: error and skip lists, scan summaries, logs, backups,");
-            Console.WriteLine("                      snapshots and reset archives. Default: the exe's folder when truedat is installed in");
-            Console.WriteLine("                      the library (Library\\truedat\\truedat.exe), else <exe folder>\\libraries\\<library-id>.");
-            Console.WriteLine("                      The catalog, sidecar, edges file, store, store-*.json and your rules stay beside the");
-            Console.WriteLine("                      catalog. Files already there move on the next writing run. Also a config key.");
             Console.WriteLine("  --store-import      Load the catalog (and its error, skip and verify lists) into the store, idempotently.");
             Console.WriteLine("  --library-root <p>  Root for --store-import (else inferred per volume); --root-role primary|mirror|endpoint.");
             Console.WriteLine("  --machine-adopt     Let this machine take over a store minted on another host.");
@@ -1058,14 +1053,14 @@ namespace Truedat
             Console.WriteLine("  --retry-errors      Re-attempt all previously failed files (clears error log)");
             Console.WriteLine("  --clear             Start over and keep how it is set up: archive truedat's analysis for this library");
             Console.WriteLine("                      (catalog, sidecar, edges file, store, lists, summaries, logs, backups, the review list)");
-            Console.WriteLine("                      into mbxmoods-clear-<time>.zip in the work folder, remove it, then scan from nothing.");
+            Console.WriteLine("                      into mbxmoods-clear-<time>.zip beside the catalog, remove it, then scan from nothing.");
             Console.WriteLine("                      Keeps your settings, exclusion rules, apply-result.json, duplicate verdicts, and the");
             Console.WriteLine("                      review list's ignore decisions (carried into a new list). Asks you to type CLEAR first.");
-            Console.WriteLine("  --reset             The full reset: what --clear does, and it also archives and removes your exclusion");
-            Console.WriteLine("                      rules, apply-result.json, duplicate verdicts and ignore decisions, into");
-            Console.WriteLine("                      mbxmoods-reset-<time>.zip. Keeps the config file. Asks you to type RESET first.");
+            Console.WriteLine("  --reset             The full reset: what --clear does, and it also archives and removes your settings");
+            Console.WriteLine("                      (the config file), exclusion rules, apply-result.json, duplicate verdicts and ignore");
+            Console.WriteLine("                      decisions, into mbxmoods-reset-<time>.zip. Asks you to type RESET first.");
             Console.WriteLine("                      --restore of either archive brings the catalog back; of a reset archive, the rule");
-            Console.WriteLine("                      files too. Both: library scan only.");
+            Console.WriteLine("                      files and the config file too. Both: library scan only.");
             Console.WriteLine("  --imeanit           Confirms --clear or --reset when nobody is at the console to type the word.");
             Console.WriteLine("  --refresh-chroma    Re-analyze every track that does not carry the current chroma marker (chromaFold):");
             Console.WriteLine("                      tracks analyzed before the chroma grouping was corrected, and any analyzed before the");
@@ -1159,8 +1154,6 @@ namespace Truedat
             // --clear and --reset archive the library's truedat files, remove them and scan from nothing (--clear keeps the
             // operator's own files, --reset takes them too); --imeanit confirms either when nobody is at the console. None is a config key.
             "clear", "reset", "imeanit",
-            // where truedat's working files go (config key `work-dir`; default beside the exe — see WorkFolder)
-            "work-dir",
         };
 
         /// <summary>Flags that consume the next token as a value. Used to turn a
@@ -1180,7 +1173,6 @@ namespace Truedat
             "library-root", "root-role", "store-export", "export-root", "store-roundtrip", "page-size", "store-dir",
             "budget",   // "edges-export" is deliberately absent: its value is optional (bare = beside the catalog).
             "split-mb",
-            "work-dir",
         };
 
         /// <summary>True when <paramref name="canonical"/> consumes the next token as its value.</summary>
@@ -1665,6 +1657,8 @@ namespace Truedat
         /// <summary>--reset or --clear was typed; --imeanit was typed with it; and, once one has happened, the sentence the end
         /// summary carries so the saved summary of that scan says what preceded it.</summary>
         static bool _resetRequested, _clearRequested, _resetConfirmed;
+        /// <summary>--no-config (or --self-test) was given: the config file is not read, and --reset leaves it where it is.</summary>
+        static bool _noConfigGiven;
         static string? _resetSummary;
         static bool StartOverRequested => _resetRequested || _clearRequested;
         static ResetCommand.Verb StartOverVerb => _clearRequested ? ResetCommand.Verb.Clear : ResetCommand.Verb.Reset;
@@ -2737,6 +2731,7 @@ namespace Truedat
                 return string.Equals(c, "no-config", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(c, "self-test", StringComparison.OrdinalIgnoreCase);
             });
+            _noConfigGiven = noConfig;
             bool configVerb = args.Any(a => string.Equals(CanonicalFlag(a), "config", StringComparison.OrdinalIgnoreCase));
             if (configVerb) { RunConfigCommand(args); return; }
             if (!noConfig)
@@ -2782,7 +2777,6 @@ namespace Truedat
             // resolved like --stats (positional / --moods / discovery) plus its ledgers into it.
             string? storePath = null;             // --store [path]: null = not asked; "" = asked, use the default location (S2 C0)
             string? storeDir = null;              // --store-dir <dir>: relocates the per-library default (<dir>\<library-id>\truedat.db)
-            string? workDir = null;               // --work-dir <dir>: where truedat's working files go (WorkFolder); default derived from the exe
             bool storeImportMode = false;
             string? storeLibraryRoot = null;
             string storeRootRole = "primary";
@@ -2963,7 +2957,6 @@ namespace Truedat
                 else if (canonical == "stats") statsMode = true;
                 else if (canonical == "store") storePath = ArgValueFollows(args, i, _argsFromConfig.Length) ? args[++i] : "";
                 else if (canonical == "store-dir" && i + 1 < args.Length) storeDir = args[++i];
-                else if (canonical == "work-dir" && i + 1 < args.Length) workDir = args[++i];
                 else if (canonical == "store-import") storeImportMode = true;
                 else if (canonical == "library-root" && i + 1 < args.Length) storeLibraryRoot = args[++i];
                 else if (canonical == "root-role" && i + 1 < args.Length) storeRootRole = args[++i];
@@ -3222,9 +3215,9 @@ namespace Truedat
             _noEdgesTyped = noEdges;
             global::Truedat.Store.StoreScan.PublishOff = global::Truedat.Store.StoreScan.ResolvePublishOff(noPublish, publishTyped, ConfigSaysOff("publish"));
             _storeDirOpt = storeDir;
-            // The work folder (2026-11-21): the rule is configured here, before any catalog is known; each library's folder is settled
-            // by the first writing use of it (BeginWork). A reading run never sets the hook, so it never creates or moves anything.
-            WorkFolder.Configure(workDir, AppDomain.CurrentDomain.BaseDirectory);
+            // Working files live beside the catalog. A writing run's first use of a library moves back what the EV6.2 build put in a
+            // folder of its own (BeginWork); a reading run never sets the hook, so it never moves anything.
+            WorkFolder.Configure(AppDomain.CurrentDomain.BaseDirectory);
             ResetWorkForTest(auditLog);   // a Main run in-process (self-tests) starts clean
             WorkFolder.BeginOnFirstUse = null;
             if (!IsReadingRun(statsMode, storeInfoMode, listReviewMode, pathsMode, previewMode, showHelp, storeSummaryMode, verifyCoverageMode, selfTest,
@@ -13975,7 +13968,6 @@ namespace Truedat
         static readonly object _workGate = new object();
         static readonly List<string> _workLines = new List<string>();
         static int _workLinesShown;
-        static bool _workHeaderShown;
         /// <summary>--audit was given: the moved names are shown on the console as well as written to truedat.log.</summary>
         static bool _workAudit;
         /// <summary>The names each catalog folder's move took, waiting for <see cref="ShowWork"/> to write them down.</summary>
@@ -13984,14 +13976,14 @@ namespace Truedat
         /// <summary>A Main run in-process (self-tests) starts with nothing said and nothing pending.</summary>
         internal static void ResetWorkForTest(bool audit)
         {
-            lock (_workGate) { _workLines.Clear(); _workLinesShown = 0; _workHeaderShown = false; _workAudit = audit; _workNames.Clear(); }
+            lock (_workGate) { _workLines.Clear(); _workLinesShown = 0; _workAudit = audit; _workNames.Clear(); }
         }
 
-        /// <summary>A WRITING run settles the work folder for the library whose catalog is <paramref name="catalogPath"/> and moves
-        /// the working files beside the catalog into it — before any of them is read, so the errors list the scan consults, the
-        /// skipped list its summary counts and the backups rotation trims are the ones that were already there. Once per catalog
-        /// folder; never throws (a move that fails leaves files where they are, and they are still read from there). What it
-        /// has to say is kept for <see cref="ShowWork"/>.</summary>
+        /// <summary>A WRITING run settles the library whose catalog is <paramref name="catalogPath"/> and moves back the working files
+        /// the EV6.2 build put in a folder of its own — before any of them is read, so the errors list the scan consults, the skipped
+        /// list its summary counts and the backups rotation trims are the ones that were already there. Once per catalog folder; never
+        /// throws (a file that cannot be moved stays where it is and is still read from there). What it has to say is kept for
+        /// <see cref="ShowWork"/>.</summary>
         internal static void BeginWork(string catalogPath)
         {
             string dir;
@@ -14001,27 +13993,14 @@ namespace Truedat
                 if (WorkFolder.IsSettled(dir)) return;
                 try
                 {
-                    WorkFolder.Begin(dir, out var note);
-                    if (note != null) _workLines.Add(note);
-                    // The hub utility's locator (item B), BEFORE anything moves: the hub reads where the files went from here.
-                    if (WorkFolder.Current != null) WorkFolder.WriteLocator(RecordFolderFor(catalogPath), dir, WorkFolder.Current);
-                    var report = WorkFolder.MoveExisting(catalogPath, _storePath);
+                    WorkFolder.Begin(dir);
+                    var report = WorkFolder.MoveBack(catalogPath, _storePath);
                     var moved = WorkFolder.Describe(report);
                     if (moved != null) _workLines.Add(moved);
                     var names = WorkFolder.MovedNames(report, dir);
                     if (names.Count > 0) _workNames.Add((dir, names));
                 }
-                catch (WorkFolder.OwnedException ex)
-                {
-                    // The work folder belongs to another library (hub review, item A): refused here, before anything was settled or moved,
-                    // and before the verb that asked for a working-file path has written one. Not a note and a fallback — two libraries
-                    // in one folder is the state this exists to stop, and the folder is the operator's to choose again.
-                    Console.Out.Flush();
-                    Console.Error.WriteLine(ex.Message);
-                    Console.Error.Flush();
-                    Environment.Exit(2);
-                }
-                catch (Exception ex) { _workLines.Add($"Work folder: the move did not run ({ex.Message}); the working files are read where they are"); }
+                catch (Exception ex) { _workLines.Add($"Working files: the move back did not run ({ex.Message}); they are read where they are"); }
             }
         }
 
@@ -14032,7 +14011,6 @@ namespace Truedat
             lock (_workGate)
             {
                 if (WorkFolder.Current == null) return;
-                if (!_workHeaderShown) { w.WriteLine($"  Work dir:   {WorkFolder.Current}"); _workHeaderShown = true; }
                 for (; _workLinesShown < _workLines.Count; _workLinesShown++) w.WriteLine("  " + _workLines[_workLinesShown]);
                 // The names that moved. Under --audit the console lists them, and when the --audit tee is on, that IS truedat.log.
                 // Otherwise they are added to truedat.log in the work folder directly, so a file that moved can always be found.
@@ -14046,23 +14024,10 @@ namespace Truedat
                         var stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
                         File.AppendAllLines(log, new[] { $"{stamp}  {names[0]}" }.Concat(names.Skip(1)));
                     }
-                    catch (Exception ex) { w.WriteLine($"  Work folder: the moved names could not be written to truedat.log ({ex.Message})"); if (!_workAudit) foreach (var l in names) w.WriteLine("  " + l); }
+                    catch (Exception ex) { w.WriteLine($"  Working files: the moved names could not be written to truedat.log ({ex.Message})"); if (!_workAudit) foreach (var l in names) w.WriteLine("  " + l); }
                 }
                 _workNames.Clear();
             }
-        }
-
-        /// <summary>The folder store-result.json goes to for this catalog — beside the store in force, else where
-        /// <c>StoreLocation.Resolve</c> puts this catalog's store (the same rule the record written without a store uses). The locator
-        /// (item B) is written there too, so the hub finds both in one place. Empty when it cannot be resolved.</summary>
-        static string RecordFolderFor(string catalogPath)
-        {
-            try
-            {
-                var at = !string.IsNullOrEmpty(_storePath) ? _storePath! : global::Truedat.Store.StoreLocation.Resolve(null, _storeDirOpt, catalogPath, out _);
-                return Path.GetDirectoryName(Path.GetFullPath(at)) ?? "";
-            }
-            catch { return ""; }
         }
 
         /// <summary>A store verb that writes store-result.json settles its library's work folder first (item B: every record writer
@@ -14170,10 +14135,6 @@ namespace Truedat
             Add("libraryXml", "library XML",
                 string.IsNullOrEmpty(libraryXml) ? Path.Combine(dir, "iTunes Music Library.xml") : libraryXml!);
 
-            // The work folder and the working files in it, resolved by the one rule (WorkFolder) the writing runs use. Each file is
-            // shown where it IS — the work folder, or beside the catalog on an install that has not run a writing verb since the
-            // move — and where it would be written when it is in neither. Nothing here creates the folder.
-            Add("workDir", "work dir", WorkFolder.For(dir), WorkFolder.Reason(dir));
             Add("log", "log", WorkFolder.Read(dir, "truedat.log"));
 
             // Host-suffixed ledgers: this host's names, via the same helpers the scan uses. A
@@ -15255,7 +15216,6 @@ namespace Truedat
             ["store-export"] = "a path",          ["store-roundtrip"] = "a path",
             ["synth-moods"] = "a path",           ["synth-output"] = "a path",
             ["transcode"] = "a path",             ["transcode-out"] = "a path",
-            ["work-dir"] = "a path",
         };
 
         /// <summary>Flag-shaped, by the same test the parse loop applies.</summary>
@@ -15789,7 +15749,7 @@ namespace Truedat
                 bool nameFolders = groups.Any(g => !g.IsCatalogFolder && (g.ReportNames.Count > 0 || g.BakCount > 0));
                 foreach (var g in groups)
                 {
-                    string where = g.IsCatalogFolder ? "beside the catalog" : $"in the work folder {g.Folder}";
+                    string where = g.IsCatalogFolder ? "beside the catalog" : $"in {g.Folder} (the next scan moves them beside the catalog)";
                     if (g.ReportNames.Count > 0)
                     {
                         accounted += g.RepBytes;
@@ -17791,11 +17751,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             var selfTestTemp = SelfTestTemp.Begin();
             SelfTestTempSelfTest.Run(Assert);
 
-            // The in-process self-tests keep today's layout — working files beside the catalog they built — so they find them where
-            // they look and write nothing under the build output. WorkFolderSelfTest turns this off for its own cases.
-            WorkFolder.UseCatalogFolderForTest = true;
             WorkFolder.BeginOnFirstUse = null;
-            WorkFolderSelfTest.Run(Assert);                          // truedat's working files leave the catalog folder: the rule, the move, every site
+            WorkFolderSelfTest.Run(Assert);                          // working files beside the catalog; the move back from the EV6.2 folder
 
             // v2 store (Truedat/Store/*): its own file, same Assert, so the single exe stays self-contained.
             global::Truedat.Store.StoreSelfTest.Run(Assert);
@@ -26374,7 +26331,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
 
             // 5. The file set.
-            var files = ResetCommand.Collect(verb, moodsPath, store, ledgerPath);
+            var configFile = ResetCommand.ConfigToTake(verb, _noConfigGiven, AppDomain.CurrentDomain.BaseDirectory);
+            var files = ResetCommand.Collect(verb, moodsPath, store, ledgerPath, configFile);
 
             // 5a. Review #3: the rule files this run names on its command line are resolved now, before anything is removed. One the
             //     reset is about to take (--reset --exclusions <the library's own rule file>) cannot be both removed and scanned with:
@@ -26435,7 +26393,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
             else
             {
-                Console.WriteLine("  Kept: the config file, the field registry, earlier snapshots and clear or reset archives.");
+                Console.WriteLine("  Kept: the field registry, earlier snapshots and clear or reset archives.");
                 if (ledgerGoes)
                     Console.WriteLine("  The review list goes with the rest, and with it any files you marked ignore there: they are tried again.");
             }
@@ -26448,7 +26406,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 var operatorFiles = files.Where(f => (f.EntryName.IndexOf('/') < 0 && ResetCommand.IsOperatorFile(f.EntryName)) || ResetCommand.IsPlaylistsEntry(f.EntryName))
                                          .Select(f => f.Path).ToList();
                 Console.WriteLine();
-                Console.WriteLine("  This is a full reset: it also removes your exclusion rules and duplicate verdicts (and the ignore decisions); --clear is the one that keeps them.");
+                Console.WriteLine("  This is a full reset: it also removes your settings, exclusion rules and duplicate verdicts (and the ignore decisions); --clear is the one that keeps them.");
+                if (configFile != null) operatorFiles.Insert(0, configFile);
+                else if (_noConfigGiven) Console.WriteLine("    (--no-config: the config file is left where it is)");
                 if (operatorFiles.Count > 0)
                     foreach (var p in operatorFiles) Console.WriteLine("    " + p);
                 else
@@ -26492,7 +26452,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             BeginWork(moodsPath);
             ShowWork(Console.Out);
             List<(string Path, string EntryName)> Announced() =>
-                ResetCommand.Collect(verb, moodsPath, store, ledgerPath).Where(f => announced.Contains(Bare(f.EntryName))).ToList();
+                ResetCommand.Collect(verb, moodsPath, store, ledgerPath, configFile).Where(f => announced.Contains(Bare(f.EntryName))).ToList();
             files = Announced();
             archive = ResetCommand.ArchivePathFor(verb, moodsPath, archiveTime);
 

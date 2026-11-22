@@ -161,8 +161,8 @@ namespace Truedat.Store
             var start = new ProcessStartInfo
             {
                 FileName = typeof(Program).Assembly.Location, WorkingDirectory = dir,
-                Arguments = WorkFolderSelfTest.ChildArgs(typeof(Program).Assembly.Location, dir, "--no-config --store " + Q(store) + " --merge-moods --merge-source " + Q(catalog)
-                    + string.Concat(sources.Select(source => " --merge-source " + Q(source))) + " --merge-output " + Q(catalog)),
+                Arguments = "--no-config --store " + Q(store) + " --merge-moods --merge-source " + Q(catalog)
+                    + string.Concat(sources.Select(source => " --merge-source " + Q(source))) + " --merge-output " + Q(catalog),
                 UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
             };
             using (var child = Process.Start(start) ?? throw new InvalidOperationException("Could not start the merge test child."))

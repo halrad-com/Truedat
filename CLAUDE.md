@@ -70,21 +70,19 @@ local tidy-up:
   `listed`; a count not known yet is null. The field names are the hub's. Every site in the list scan that decides a
   listed path's fate tells `StoreResult.List` — a new skip or failure site that does not will show up as `notExamined`.
   Not written: a run with no catalog target (nowhere a reader would look), and a `--chunk` shard with no store.
-  Every record also carries top-level `workFolder` (2026-11-21, additive, no version change): the absolute path of the
-  work folder the run settled — the catalog folder after a fallback — written by every record from the moment the folder
-  is settled, and **absent** (not empty, not null) before that. The hub's utility reads it to list truedat's working
-  files; it must never re-derive the rule.
-- **The hub's files never leave the catalog folder; truedat's working files do** (2026-11-21, `WorkFolder`). The
-  catalog and its parts, the sidecar, `mbxedges.v1.json`, the store with `-wal`/`-shm`, every `store-*.json`, the
-  operator's rules (`mbxmoods-exclude.json` and its children, `apply-result.json`), the `mbxmoods-duplicate*` family and
-  the review files stay exactly where they were. Everything else `ClassifySideFile` counts — the ledgers, scan
-  summaries, logs, catalog and store backups, snapshots, clear and reset archives, list reports — goes to the work folder: the
-  exe's folder when it is the catalog folder or a direct child of it, else `<exe>\libraries\<StoreLocation.LibraryId>`,
-  or `--work-dir` / config `work-dir`. `WorkFolder.IsWorkingFile` is the one definition of which files move;
-  `WorkFolder.Resolve` the one rule for where. A writing run moves what an earlier build left beside the catalog before
-  it reads any of it (never writing over a file — the older copy is kept as `.moved-<time>`); a reading run moves
-  nothing, creates nothing, and reads the work folder first and the catalog folder second. Moving a file the hub opens
-  by location, or making the hub derive the folder, is a cross-repo change.
+  Every record also carries top-level `workFolder` (2026-11-21, additive, no version change), written by every record
+  from the moment the run settles its library and **absent** (not empty, not null) before that. Since the relocation
+  was removed it is always the catalog folder; it stays so a reader of the field keeps working.
+- **Every file truedat writes for a library lives beside that library's catalog** (2026-11-22, operator: "if you have
+  multiple libraries the files dont make sense in 1 location"). 0.5.5.4-EV6.2 moved the working files (ledgers,
+  summaries, logs, backups, snapshots, clear/reset archives, list reports) to a folder by the exe; that is removed —
+  no `--work-dir`, no config `work-dir`, no `truedat-work-folder.json`. What is left in `WorkFolder` is the move BACK:
+  a writing run's first use of a library (`BeginWork`) moves what that build left in `<exe>` (exe in the catalog
+  folder's child) or `<exe>\libraries\<StoreLocation.LibraryId>` back beside the catalog, never writing over a file
+  (the older copy kept as `.moved-<time>`), then removes that folder's `.truedat-work-owner.json` and the locator. A
+  folder whose owner marker names another library — or cannot be read — is never read or emptied for this one. A
+  reading run moves nothing and reads beside the catalog first, the old folder second. `WorkFolder.IsWorkingFile` is
+  still the one definition of which files are working files.
 - **`--preview` emits both `preview.json` and the page**, and `preview.json` **is** the review
   manifest the hub serves (its filename stem is the route id). The hub's asset route serves
   only `.html` and no route serves an arbitrary sibling JSON, which is why the plan payload
@@ -131,12 +129,15 @@ local tidy-up:
   over** (2026-11-20; split in two 2026-11-21, operator: "clear keeps what you have but clears the truedat db / reset is a
   full reset"). One implementation (`ResetCommand`, `RunReset(verb, …)`); the verbs differ only in `ResetCommand.Keeps`,
   the one keep-list, pinned as a table. Each archives what it takes into `mbxmoods-clear-<time>.zip` /
-  `mbxmoods-reset-<time>.zip` in the work folder, removes it, and runs the library scan from nothing. The file set
+  `mbxmoods-reset-<time>.zip` beside the catalog, removes it, and runs the library scan from nothing. The file set
   (`ResetCommand.Collect`) is whatever the scan summary's size block counts — beside the catalog, everything
-  `ClassifySideFile` (one definition of "ours") names; in the work folder, what `WorkFolder.IsWorkingFile` names, under
-  `work/` in the archive; in the hub's review folder, `mbxmoods-review.json` and nothing else — less `Keeps`. **Both
-  keep** snapshots, every earlier clear or reset archive, the config file, the field registry and the exclusion file's
-  lock. **`--clear` also keeps the operator's own files** (`ResetCommand.IsOperatorFile`: `mbxmoods-exclude*` — the
+  `ClassifySideFile` (one definition of "ours") names; in a folder the EV6.2 build used and no scan has emptied yet, what
+  `WorkFolder.IsWorkingFile` names, under `work/` in the archive; in the hub's review folder, `mbxmoods-review.json` and
+  nothing else — less `Keeps`. **Both keep** snapshots, every earlier clear or reset archive, the field registry and the
+  exclusion file's lock. **`--reset` takes the config file** (`truedat.config.json` beside the exe, archived as
+  `config/truedat.config.json`; operator 2026-11-22: "im not seeing a reset reset the truedat config") unless the run has
+  `--no-config`; `--restore` of a reset archive puts it back beside the exe and refuses while one is there.
+  **`--clear` keeps the config file and the operator's own files** (`ResetCommand.IsOperatorFile`: `mbxmoods-exclude*` — the
   rules, their backups, the exclusion playlist — `apply-result.json` and `mbxmoods-duplicates.verdicts.json`) and
   carries the review list's `ignore` records into a fresh list, unchanged, written by the scan's own writer
   (operator: "give me a clean slate but i dont want to resetup how its working now"); a review list it cannot read
@@ -155,9 +156,8 @@ local tidy-up:
   beside the catalog byte for byte, and a restore that would write over one that exists now refuses before changing
   anything, naming it. The store's write-ahead log is folded into its main file before archiving
   (`ResetCommand.FoldStoreLog`), because `--restore` takes only the main file out of an archive. The new store's
-  generation starts over (operator: "reset means reset"); a hub left running reloads with Reload mood data. Two points
-  are the architect's, not yet the operator's ruling: the archive always comes before removal, and the config file is
-  kept by both.
+  generation starts over (operator: "reset means reset"); a hub left running reloads with Reload mood data. One point
+  is the architect's, not yet the operator's ruling: the archive always comes before removal.
 - **Reason strings in `preview.json`'s `review[].reasons`** are rendered by the hub, not parsed
   by it — confirmed on their side. Enriching the text is safe; the shape is not.
 - **The `kind` string in every JSON artifact written to the hub's review folder is a contract** (2026-11-20).

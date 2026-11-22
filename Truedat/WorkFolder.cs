@@ -7,272 +7,89 @@ using System.Security.Cryptography;
 namespace Truedat
 {
     /// <summary>
-    /// Where truedat's WORKING files go (operator 2026-11-21: "right now we are littering the catalog folder. i really
-    /// think we need to move that to the folder with the exe by default").
+    /// truedat's WORKING files — the error and skip lists, scan summaries, the audit log, catalog and store backups,
+    /// snapshots, clear and reset archives, the reports a verb emits — live beside the catalog, as they always did.
     ///
-    /// The catalog folder is the hub's folder: the catalog, its sidecar, the edges companion, the store and every
-    /// <c>store-*.json</c> record are read from it BY LOCATION, and the operator's own rules live there too. Everything
-    /// else truedat writes — the error and skip ledgers, scan summaries, the audit log, catalog and store backups,
-    /// snapshots, reset archives, the reports a verb emits — is this process's working material, and it goes to ONE
-    /// folder derived from the exe.
+    /// For one release (0.5.5.4-EV6.2) they were moved to a folder derived from the exe. That was removed (operator
+    /// 2026-11-22: "if you have multiple libraries the files dont make sense in 1 location"). What is left here is the move
+    /// BACK: a writing run takes the working files out of the folder that release used for this library and puts them beside
+    /// the catalog again (<see cref="MoveBack"/>), and a reading run, which moves nothing, still finds them there
+    /// (<see cref="Read"/>, <see cref="Folders"/>), so an install that has not scanned since answers as it did.
     ///
-    /// <see cref="Resolve(string,string,string)"/> is that one rule; no site may spell one of those paths any other way.
-    /// Three cases:
-    ///   * <c>--work-dir</c> (or config <c>work-dir</c>) — used as given;
-    ///   * the exe's folder IS the catalog folder or a direct child of it (the usual install,
-    ///     <c>Library\truedat\truedat.exe</c>) — the exe's folder;
-    ///   * anywhere else — <c>&lt;exe folder&gt;\libraries\&lt;library id&gt;\</c>, the same id the store uses to keep one
-    ///     library's file apart from another's. One exe serving two libraries must never write two libraries' error
-    ///     ledgers to one path.
-    /// A folder that cannot be written falls back to the catalog folder, which is what every build before this did.
-    ///
-    /// Reading and writing differ on purpose. A WRITING run settles its work folder with <see cref="Begin"/> — created,
-    /// and the files already beside the catalog moved into it (<see cref="MoveExisting"/>) before any of them is read —
-    /// either explicitly at the scan's entry or on the first use of a working-file path (<see cref="BeginOnFirstUse"/>).
-    /// A READING run creates nothing and moves nothing, and finds each file with <see cref="Read"/> — work folder first,
-    /// catalog folder second — so an install that has not scanned since the upgrade answers exactly as before.
+    /// The folder that release used is found from what it left behind, never guessed: the exe's own folder when truedat is
+    /// installed in the library (<c>Library\truedat\truedat.exe</c>), <c>&lt;exe&gt;\libraries\&lt;library id&gt;</c>
+    /// otherwise, and whatever its locator file beside the catalog names. A folder whose owner marker names ANOTHER library is
+    /// never read or emptied for this one.
     /// </summary>
     internal static class WorkFolder
     {
-        /// <summary>The folder under the exe that holds one sub-folder per library, when the exe is not installed in one.</summary>
-        internal const string LibrariesDir = "libraries";
-        /// <summary>The flag and the config key — one spelling.</summary>
-        internal const string Flag = "work-dir";
         /// <summary>The suffix a file takes when it cannot be the live one at its name (both folders held one).</summary>
         internal const string MovedSuffix = ".moved-";
         /// <summary>The dedupe verdicts sidecar (restfulbee's intake-dedupe spec): written by a person or by
         /// <c>tools/init-dedupe-verdicts.ps1</c>, never by the exe.</summary>
         internal const string DedupeVerdictsFileName = "mbxmoods-duplicates.verdicts.json";
-        /// <summary>Every file <c>--duplicates</c> writes, and the operator's verdicts keyed against them, start with this
-        /// (architect ruling 2026-11-21: the family stays with the catalog, so a person running the dedupe scripts types one folder).</summary>
+        /// <summary>Every file <c>--duplicates</c> writes, and the operator's verdicts keyed against them, start with this.</summary>
         internal const string DuplicatesPrefix = "mbxmoods-duplicate";
 
-        /// <summary>Self-test seam: true makes the configured rule answer "the catalog folder", today's layout, so the in-process
-        /// self-tests that write working files keep finding them where they look and write nothing under the build output.
-        /// <see cref="WorkFolderSelfTest"/> turns it off for its own cases. False in production.</summary>
-        internal static bool UseCatalogFolderForTest;
+        // What the EV6.2 build left behind, read to find its folder.
+        internal const string LegacyLibrariesDir = "libraries";
+        internal const string LegacyLocatorFileName = "truedat-work-folder.json";
+        internal const string LegacyOwnerMarkerName = ".truedat-work-owner.json";
 
         /// <summary>Set by a WRITING run: called the first time a working-file path is asked for a catalog folder this run has
-        /// not settled, so the work folder is created and the files beside the catalog are moved before anything reads or
-        /// writes one. Null in a reading run — which is what keeps a reading run from moving or creating anything.</summary>
+        /// not settled, so the files the EV6.2 build moved away come back before anything reads or writes one. Null in a reading
+        /// run — which is what keeps a reading run from moving anything.</summary>
         internal static Action<string>? BeginOnFirstUse;
 
-        static string? _option;
         static string _exeDir = AppDomain.CurrentDomain.BaseDirectory;
         static readonly object Gate = new object();
-        static readonly Dictionary<string, string> Settled = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        static readonly HashSet<string> Created = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        static readonly HashSet<string> Settled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> Beginning = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        /// <summary>A work folder that could not be written this run but exists (review #15): the catalog folder takes the writes, and
-        /// this one stays a READ source, so the ledgers an earlier run moved into it are still consulted.</summary>
-        static readonly Dictionary<string, string> ReadAlso = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The folders this run moved files back from, per catalog folder: a store keys the ledger rows it imported on the
+        /// ledger's PATH, so <see cref="OtherPlace"/> still answers with the old path after the folder has been emptied.</summary>
+        static readonly Dictionary<string, List<string>> MovedFrom = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         /// <summary>Files a run was HANDED (a --restore's archive): never moved, whatever they are called (review #8).</summary>
         static readonly HashSet<string> Kept = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>The move leaves this file where it is. For a run's own input, resolved to a full path before the work folder is
-        /// settled: a --restore handed an archive beside the catalog moved it into the work folder while settling, and then could not
-        /// open the path it was given (review #8).</summary>
+        /// <summary>The move leaves this file where it is. For a run's own input, resolved to a full path before the folder is
+        /// settled, so a --restore handed an archive in the old folder can still open the path it was given (review #8).</summary>
         internal static void Keep(string path)
         {
             try { var full = Path.GetFullPath(path); lock (Gate) Kept.Add(full); } catch { }
         }
 
-        /// <summary>The work folder of the library this run is working on, once one has been settled; null before that.
-        /// This is the value <c>store-result.json</c> reports as <c>workFolder</c> (hub contract), so the hub's utility never
-        /// re-derives the rule. After a fallback it is the folder actually used: the catalog folder.</summary>
+        /// <summary>The catalog folder of the library this run settled; null before that. This is the value <c>store-result.json</c>
+        /// reports as <c>workFolder</c> (hub contract, kept so a reader of the field keeps working): the catalog folder.</summary>
         internal static string? Current { get; private set; }
 
-        /// <summary>The catalog folder <see cref="Current"/> was settled for; null before that.</summary>
-        internal static string? CurrentCatalogDir { get; private set; }
-
-        /// <summary>The operator's choice and the exe's folder, both known before any catalog is. Clears everything an earlier
-        /// configuration settled, so one process can serve several (the self-tests).</summary>
-        internal static void Configure(string? option, string exeDir)
+        /// <summary>The exe's folder (where the EV6.2 build put working files). Clears everything an earlier configuration settled,
+        /// so one process can serve several (the self-tests).</summary>
+        internal static void Configure(string exeDir)
         {
             lock (Gate)
             {
-                _option = string.IsNullOrWhiteSpace(option) ? null : option;
                 _exeDir = string.IsNullOrWhiteSpace(exeDir) ? AppDomain.CurrentDomain.BaseDirectory : exeDir;
-                Settled.Clear(); Created.Clear(); Beginning.Clear(); ReadAlso.Clear(); Kept.Clear();
-                Current = null; CurrentCatalogDir = null;
+                Settled.Clear(); Beginning.Clear(); MovedFrom.Clear(); Kept.Clear();
+                Current = null;
             }
         }
 
-        /// <summary>The rule, with nothing ambient and no I/O — what the self-test pins.</summary>
-        internal static string Resolve(string catalogDir, string? option, string exeDir)
-        {
-            if (!string.IsNullOrWhiteSpace(option)) return Norm(option!);
-            var exe = Norm(exeDir);
-            var cat = Norm(catalogDir);
-            if (Same(exe, cat)) return exe;                                              // the exe sits in the library folder itself
-            var parent = Path.GetDirectoryName(exe);
-            if (!string.IsNullOrEmpty(parent) && Same(Norm(parent!), cat)) return exe;   // Library\truedat\truedat.exe
-            return Path.Combine(exe, LibrariesDir, global::Truedat.Store.StoreLocation.LibraryId(cat));
-        }
+        /// <summary>Where a library's working files go: beside its catalog.</summary>
+        internal static string For(string catalogDir) => Norm(catalogDir);
 
-        /// <summary>The rule against this run's configuration.</summary>
-        internal static string Resolve(string catalogDir)
-            => UseCatalogFolderForTest ? Norm(catalogDir) : Resolve(catalogDir, _option, _exeDir);
-
-        /// <summary>Why the rule gave what it gave, for <c>--paths</c>.</summary>
-        internal static string Reason(string catalogDir)
-        {
-            var cat = Norm(catalogDir);
-            var dir = For(cat);
-            if (Same(dir, cat)) return Same(Resolve(cat), cat) ? "the catalog folder" : "the catalog folder: the work folder could not be written";
-            if (_option != null) return "--work-dir";
-            return dir.StartsWith(Path.Combine(Norm(_exeDir), LibrariesDir) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                ? $"under the exe, library id {(global::Truedat.Store.StoreLocation.LibraryId(cat))}"
-                : "the exe's folder (truedat is installed in the library)";
-        }
-
-        /// <summary>The work folder for a library, as this run has settled it, or as the rule gives it. Creates nothing.</summary>
-        internal static string For(string catalogDir)
-        {
-            var cat = Norm(catalogDir);
-            lock (Gate) { if (Settled.TryGetValue(cat, out var settled)) return settled; }
-            return Resolve(cat);
-        }
-
-        /// <summary>A WRITING run settles its work folder: created, or the catalog folder when it cannot be
-        /// (<paramref name="note"/> is then the one line that says so, naming both folders).</summary>
-        internal static string Begin(string catalogDir, out string? note)
-        {
-            note = null;
-            var cat = Norm(catalogDir);
-            var want = Resolve(cat);
-            // The catalog folder under another name (a junction to it, a subst drive): it IS the catalog folder, and is settled as that,
-            // so nothing is moved into itself (review #14).
-            if (!Same(want, cat) && SameEntry(want, cat)) want = cat;
-            if (!Same(want, cat) && Ensure(want)) ClaimOwnership(want, cat);   // throws OwnedException before anything is settled or moved
-            if (!Same(want, cat) && !Ensure(want))
-            {
-                bool holdsFiles = false;
-                try { holdsFiles = Directory.Exists(want); } catch { }
-                note = $"Work folder: {want} cannot be written — truedat's working files stay beside the catalog in {cat}"
-                     + (holdsFiles ? "; the files already in it are still read" : "");
-                if (holdsFiles) lock (Gate) ReadAlso[cat] = want;
-                want = cat;
-            }
-            lock (Gate) { Settled[cat] = want; Current = want; CurrentCatalogDir = cat; }
-            return want;
-        }
-
-        // ---- the hub utility's locator (hub review, item B) -----------------------------------------------------
-
-        /// <summary>Written where store-result.json goes, so the hub's utility finds a library's work folder without re-deriving the
-        /// rule. Field names and kind are a contract agreed with the hub.</summary>
-        internal const string LocatorFileName = "truedat-work-folder.json";
-        internal const string LocatorKind = "truedat-work-folder";
-
-        /// <summary>Write the locator into <paramref name="locatorDir"/> naming the catalog folder, the work folder actually used (the
-        /// catalog folder after a fallback) and the library id. Rewritten only when one of those changes — writtenUtc alone never
-        /// triggers a write. Called by a WRITING run as it settles its folder, before the move; a reading run never calls it. A folder
-        /// that does not exist gets none (the record is not written there either). Never throws; true when written.</summary>
-        internal static bool WriteLocator(string locatorDir, string catalogDir, string workFolder)
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(locatorDir) || !Directory.Exists(locatorDir)) return false;
-                var path = Path.Combine(locatorDir, LocatorFileName);
-                var cat = Norm(catalogDir);
-                var work = Norm(workFolder);
-                var id = global::Truedat.Store.StoreLocation.LibraryId(cat);
-                if (File.Exists(path))
-                {
-                    try
-                    {
-                        var d = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path));
-                        if (d?["kind"]?.GetValue<string>() == LocatorKind && d?["version"]?.GetValue<int>() == 1
-                            && d?["catalogFolder"]?.GetValue<string>() == cat && d?["workFolder"]?.GetValue<string>() == work
-                            && d?["libraryId"]?.GetValue<string>() == id)
-                            return false;
-                    }
-                    catch (Exception) { /* unreadable: written fresh below */ }
-                }
-                var json = new System.Text.Json.Nodes.JsonObject
-                {
-                    ["kind"] = LocatorKind,
-                    ["version"] = 1,
-                    ["catalogFolder"] = cat,
-                    ["workFolder"] = work,
-                    ["libraryId"] = id,
-                    ["writtenUtc"] = DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
-                }.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-                var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                File.WriteAllText(tmp, json);
-                Program.AtomicReplace(tmp, path);
-                return true;
-            }
-            catch (Exception) { return false; }
-        }
-
-        // ---- the owner marker (hub review, item A) ------------------------------------------------------------
-
-        /// <summary>The file a work folder that is not its catalog folder carries, naming the catalog folder it belongs to. A dot name:
-        /// not a working file, so it is never moved, archived or rotated.</summary>
-        internal const string OwnerMarkerName = ".truedat-work-owner.json";
-        internal const string OwnerMarkerKind = "truedat-work-owner";
-
-        /// <summary>A work folder that already belongs to another library. Nothing was settled and nothing moved.</summary>
-        internal sealed class OwnedException : IOException
-        {
-            internal OwnedException(string message) : base(message) { }
-        }
-
-        /// <summary>The first library to settle a work folder writes the marker; any other library is refused. A config <c>work-dir</c>
-        /// is used as given for every catalog, so without this two libraries shared one folder's backups, reports and error lists,
-        /// and a reset or a rotation of one took the other's. The owner is compared by directory identity
-        /// (<see cref="SameEntry"/>), not by spelling. Written to a temp name and moved into place without writing over anything; a
-        /// marker that appeared meanwhile is read and judged like one that was there.</summary>
-        static void ClaimOwnership(string work, string cat)
-        {
-            var marker = Path.Combine(work, OwnerMarkerName);
-            for (int attempt = 0; attempt < 3; attempt++)
-            {
-                if (File.Exists(marker))
-                {
-                    string? owner = null;
-                    try
-                    {
-                        var doc = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(marker));
-                        if (doc?["kind"]?.GetValue<string>() == OwnerMarkerKind) owner = doc?["catalogFolder"]?.GetValue<string>();
-                    }
-                    catch (Exception) { }
-                    if (owner != null && SameEntry(owner, cat)) return;
-                    throw new OwnedException(owner == null
-                        ? $"Error: the work folder {work} holds {OwnerMarkerName}, which could not be read, so it cannot be told whose it is; this run's catalog is in {cat}. Nothing was changed. Remove that file if the folder is this library's, or give this library its own --{Flag}."
-                        : $"Error: the work folder {work} belongs to the library in {owner} (its {OwnerMarkerName} says so), and this run's catalog is in {cat}. "
-                          + $"Two libraries must not share one work folder: their backups, reports and error lists would mix. Nothing was changed. "
-                          + $"Give this library its own --{Flag} (or config {Flag}), or remove {marker} if that library is gone.");
-                }
-                var json = new System.Text.Json.Nodes.JsonObject
-                {
-                    ["kind"] = OwnerMarkerKind,
-                    ["version"] = 1,
-                    ["catalogFolder"] = cat,
-                    ["libraryId"] = global::Truedat.Store.StoreLocation.LibraryId(cat),
-                }.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-                var tmp = marker + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                try
-                {
-                    File.WriteAllText(tmp, json);
-                    File.Move(tmp, marker);   // never over a marker another run wrote meanwhile: that one is read on the next pass
-                    return;
-                }
-                catch (Exception)
-                {
-                    try { File.Delete(tmp); } catch { }
-                    if (!File.Exists(marker)) return;   // the folder takes no marker: the run goes on as before, unmarked
-                }
-            }
-        }
-
-        /// <summary>True once this run has settled the work folder for <paramref name="catalogDir"/>.</summary>
+        /// <summary>True once this run has settled <paramref name="catalogDir"/>.</summary>
         internal static bool IsSettled(string catalogDir)
         {
             var cat = Norm(catalogDir);
-            lock (Gate) return Settled.ContainsKey(cat);
+            lock (Gate) return Settled.Contains(cat);
+        }
+
+        /// <summary>A WRITING run settles the library it works on. The move back is <see cref="MoveBack"/>, called by the run.</summary>
+        internal static string Begin(string catalogDir)
+        {
+            var cat = Norm(catalogDir);
+            lock (Gate) { Settled.Add(cat); Current = cat; }
+            return cat;
         }
 
         /// <summary>A writing run's first use of a catalog folder: settle it through <see cref="BeginOnFirstUse"/> before the path
@@ -283,73 +100,49 @@ namespace Truedat
             if (hook == null) return;
             lock (Gate)
             {
-                if (Settled.ContainsKey(cat) || !Beginning.Add(cat)) return;
+                if (Settled.Contains(cat) || !Beginning.Add(cat)) return;
             }
             try { hook(cat); }
             finally { lock (Gate) Beginning.Remove(cat); }
         }
 
-        /// <summary>Where a working file is WRITTEN. The folder is created on the way, and falls back to the catalog folder
-        /// rather than throw — a working file that cannot go to the work folder goes where it always went.</summary>
+        /// <summary>Where a working file is WRITTEN: beside the catalog.</summary>
         internal static string Write(string catalogDir, string name)
         {
             var cat = Norm(catalogDir);
             FirstUse(cat);
-            var dir = For(cat);
-            if (!Same(dir, cat) && !Ensure(dir)) dir = cat;
-            return Path.Combine(dir, name);
+            return Path.Combine(cat, name);
         }
 
-        /// <summary>Where a working file is READ (or appended to): the work folder when it holds one, the catalog folder when
-        /// it does (a file another program held when the move ran), and the work folder's path when neither does — that is
-        /// where a write puts it.</summary>
+        /// <summary>Where a working file is READ (or appended to): beside the catalog; in the old folder when only it holds the file
+        /// (a reading run on an install that has not scanned since, or a file another program held when the move ran).</summary>
         internal static string Read(string catalogDir, string name)
         {
             var cat = Norm(catalogDir);
             FirstUse(cat);
-            var dir = For(cat);
-            var work = Path.Combine(dir, name);
-            if (Same(dir, cat))
+            var here = Path.Combine(cat, name);
+            try { if (File.Exists(here)) return here; } catch { return here; }
+            foreach (var old in LegacyFolders(cat))
             {
-                // After a fallback (review #15): a file the catalog folder does not hold but the unwritable work folder does is the
-                // history this run must consult. It is copied beside the catalog (where this run's writes go) on first use, so it is
-                // read AND can be appended to; when the copy cannot be made, the old file is still read where it is.
-                string? old; lock (Gate) ReadAlso.TryGetValue(cat, out old);
-                if (old == null) return work;
-                try
-                {
-                    if (File.Exists(work)) return work;
-                    var held = Path.Combine(old, name);
-                    if (!File.Exists(held)) return work;
-                    try { File.Copy(held, work, false); File.SetLastWriteTimeUtc(work, File.GetLastWriteTimeUtc(held)); return work; }
-                    catch { return File.Exists(work) ? work : held; }
-                }
-                catch { return work; }
+                var there = Path.Combine(old, name);
+                try { if (File.Exists(there)) return there; } catch { }
             }
-            try { if (File.Exists(work)) return work; } catch { }
-            var beside = Path.Combine(cat, name);
-            try { if (File.Exists(beside)) return beside; } catch { }
-            bool created; lock (Gate) created = Created.Contains(dir);
-            if (created || BeginOnFirstUse != null) { if (!Ensure(dir)) return beside; }   // a writing run will append here
-            return work;
+            return here;
         }
 
-        /// <summary>The folders this library's truedat files can be in — the work folder first, the catalog folder second;
-        /// one entry when they are the same. The size block, the reset's file set and every rotation read both.</summary>
+        /// <summary>The folders this library's truedat files can be in — the catalog folder first, then any old folder still holding
+        /// some. The size block, the reset's file set and every rotation read all of them.</summary>
         internal static List<string> Folders(string catalogDir)
         {
             var cat = Norm(catalogDir);
             FirstUse(cat);
-            var work = For(cat);
-            var list = new List<string> { work };
-            if (!Same(work, cat)) list.Add(cat);
-            string? old; lock (Gate) ReadAlso.TryGetValue(cat, out old);
-            if (old != null && !list.Contains(old, StringComparer.OrdinalIgnoreCase)) list.Add(old);   // review #15: still a place its files are
+            var list = new List<string> { cat };
+            foreach (var old in LegacyFolders(cat)) if (!list.Contains(old, StringComparer.OrdinalIgnoreCase)) list.Add(old);
             return list;
         }
 
-        /// <summary>Files matching <paramref name="pattern"/> across <see cref="Folders"/>, the work folder's copy winning
-        /// a name held in both (a file that could not be moved is still found, and is never counted twice).</summary>
+        /// <summary>Files matching <paramref name="pattern"/> across <see cref="Folders"/>, the catalog folder's copy winning a name
+        /// held in both (never counted twice).</summary>
         internal static List<string> Files(string catalogDir, string pattern)
         {
             var found = new List<string>();
@@ -363,49 +156,120 @@ namespace Truedat
             return found;
         }
 
-        /// <summary>The same name in the other folder: beside the catalog for a work-folder path, in the work folder for a path
-        /// beside the catalog; null when the two folders are one. For the dedupe keys a store holds by file path, so a ledger
-        /// that moved is still recognised as the one already imported.</summary>
+        /// <summary>The same name in the other place: beside the catalog for a path in an old folder, in the old folder for a path
+        /// beside the catalog; null when there is no old folder. For the dedupe keys a store holds by file path, so a ledger that
+        /// moved is still recognised as the one already imported.</summary>
         internal static string? OtherPlace(string catalogDir, string path)
         {
             var cat = Norm(catalogDir);
-            var work = For(cat);
-            if (Same(work, cat)) return null;
             var name = Path.GetFileName(path);
-            var here = Norm(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".");
-            if (Same(here, work)) return Path.Combine(cat, name);
-            if (Same(here, cat)) return Path.Combine(work, name);
+            string here;
+            try { here = Norm(Path.GetDirectoryName(Path.GetFullPath(path)) ?? "."); } catch { return null; }
+            var olds = new List<string>(LegacyFolders(cat));
+            lock (Gate) { if (MovedFrom.TryGetValue(cat, out var gone)) foreach (var g in gone) if (!olds.Contains(g, StringComparer.OrdinalIgnoreCase)) olds.Add(g); }
+            if (olds.Count == 0) return null;
+            if (Same(here, cat)) return Path.Combine(olds[0], name);
+            if (olds.Any(o => Same(o, here))) return Path.Combine(cat, name);
             return null;
         }
 
-        /// <summary>Where a backup of a STORE goes (the catalog's own backups use <see cref="Write"/> on the catalog folder). A store
-        /// in a catalog folder this run has settled has its backups in that library's work folder; a store anywhere else — kept in
-        /// its own folder — keeps them beside it, as before: that folder is not a catalog folder, and it is never settled or
-        /// emptied from here. A store opened before its library was settled backs up beside itself, and the next writing run's
-        /// move carries the backup over.</summary>
+        /// <summary>Where a backup of a STORE goes: beside the store.</summary>
         internal static string BackupPath(string filePath, string backupName)
         {
             var dir = Norm(Path.GetDirectoryName(Path.GetFullPath(filePath)) ?? ".");
-            if (IsSettled(dir)) return Write(dir, backupName);
             return Path.Combine(dir, backupName);
         }
 
-        /// <summary>The folders a backup named after <paramref name="filePath"/> can be in, for rotation: its backup folder first,
-        /// then the file's own folder (backups written before the move). One entry when they are the same.</summary>
+        /// <summary>The folders a backup named after <paramref name="filePath"/> can be in, for rotation: the file's own folder, then
+        /// any old folder of the library there (backups the EV6.2 build wrote).</summary>
         internal static List<string> BackupFolders(string filePath)
         {
             var dir = Norm(Path.GetDirectoryName(Path.GetFullPath(filePath)) ?? ".");
-            var list = new List<string>();
-            var backups = Norm(Path.GetDirectoryName(BackupPath(filePath, "x")) ?? dir);
-            list.Add(backups);
-            if (!Same(backups, dir)) list.Add(dir);
+            var list = new List<string> { dir };
+            foreach (var old in LegacyFolders(dir)) if (!list.Contains(old, StringComparer.OrdinalIgnoreCase)) list.Add(old);
             return list;
+        }
+
+        // ---- the folder the EV6.2 build used --------------------------------------------------------------
+
+        /// <summary>The folders the EV6.2 build may have moved this library's working files into, that exist and still hold one.
+        /// Found from what that build left, never guessed: its locator beside the catalog, the exe's folder when the exe sits in the
+        /// catalog folder's child, and <c>&lt;exe&gt;\libraries\&lt;library id&gt;</c>. A folder whose owner marker names another
+        /// library is not this library's and is never returned. Creates nothing.</summary>
+        internal static List<string> LegacyFolders(string catalogDir)
+        {
+            var cat = Norm(catalogDir);
+            var found = new List<string>();
+            foreach (var cand in LegacyCandidates(cat))
+            {
+                try
+                {
+                    if (found.Contains(cand, StringComparer.OrdinalIgnoreCase) || Same(cand, cat) || !Directory.Exists(cand)) continue;
+                    if (SameEntry(cand, cat)) continue;                 // the catalog folder under another name (a junction, a subst drive)
+                    if (OwnedByAnother(cand, cat)) continue;
+                    if (!HoldsWorkingFiles(cand)) continue;
+                    found.Add(cand);
+                }
+                catch { }
+            }
+            return found;
+        }
+
+        static IEnumerable<string> LegacyCandidates(string cat)
+        {
+            string exe;
+            try { exe = Norm(_exeDir); } catch { yield break; }
+            var located = ReadLocator(Path.Combine(cat, LegacyLocatorFileName), cat);
+            if (located != null) yield return located;
+            var parent = Path.GetDirectoryName(exe);
+            if (!string.IsNullOrEmpty(parent) && Same(Norm(parent!), cat)) yield return exe;
+            string? byId = null;
+            try { byId = Norm(Path.Combine(exe, LegacyLibrariesDir, global::Truedat.Store.StoreLocation.LibraryId(cat))); } catch { }
+            if (byId != null) yield return byId;
+        }
+
+        /// <summary>The work folder a locator names for this catalog folder, or null (no locator, unreadable, or another library's).</summary>
+        static string? ReadLocator(string path, string cat)
+        {
+            try
+            {
+                if (!File.Exists(path)) return null;
+                var d = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path));
+                if (d?["kind"]?.GetValue<string>() != "truedat-work-folder") return null;
+                var owner = d?["catalogFolder"]?.GetValue<string>();
+                var work = d?["workFolder"]?.GetValue<string>();
+                if (string.IsNullOrEmpty(owner) || string.IsNullOrEmpty(work) || !SameEntry(owner!, cat)) return null;
+                return Norm(work!);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>The folder carries an owner marker that names a different catalog folder (or cannot be read): not this library's.</summary>
+        static bool OwnedByAnother(string folder, string cat)
+        {
+            var marker = Path.Combine(folder, LegacyOwnerMarkerName);
+            if (!File.Exists(marker)) return false;
+            try
+            {
+                var doc = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(marker));
+                var owner = doc?["catalogFolder"]?.GetValue<string>();
+                return owner == null || !SameEntry(owner, cat);
+            }
+            catch { return true; }
+        }
+
+        /// <summary>The folder holds at least one file the EV6.2 build would have moved there.</summary>
+        static bool HoldsWorkingFiles(string folder)
+        {
+            foreach (var f in Directory.GetFiles(folder))
+                if (IsWorkingFile(Path.GetFileName(f), "mbxmoods.json", "mbxmoods.mbxs", null, global::Truedat.Store.StoreLocation.FileName)) return true;
+            return false;
         }
 
         // ---- what moves -------------------------------------------------------------------------------------
 
         /// <summary>
-        /// Does this file truedat wrote belong in the work folder, or does it stay with the catalog?
+        /// Is this file truedat wrote a WORKING file — one the EV6.2 build moved away, and the move back brings home?
         /// <see cref="Program.ClassifySideFile"/> stays the one definition of "a file truedat wrote"; this is the one
         /// definition of which of them are WORKING files. Everything the hub reads by location stays: the catalog and its
         /// numbered parts, the sidecar, the edges companion, the store with its write-ahead pair, every <c>store-*.json</c>
@@ -449,7 +313,7 @@ namespace Truedat
             // The field registry: a decision about what the catalog carries.
             if (Is("mbxmoods-schema.json")) return true;
             // A verify shard's coverage receipt (review #16): small, named per host and shard, and read by --verify-coverage on ANY
-            // host — so it lives with the shared catalog, not in the writing host's own work folder.
+            // host — so it lives with the shared catalog.
             if (IsVerifyReceipt(name, catalogName)) return true;
             // What truedat writes for the hub to render: the review ledger and the preview page. Normally in the hub's
             // review folder; beside the catalog they are still the hub's. A --chunk shard's ledger carries the host suffix
@@ -476,41 +340,40 @@ namespace Truedat
             return rest.Length > 0;
         }
 
-        // ---- the move ---------------------------------------------------------------------------------------
+        // ---- the move back --------------------------------------------------------------------------------
 
-        /// <summary>What <see cref="MoveExisting"/> did, for the one line a run prints.</summary>
+        /// <summary>What <see cref="MoveBack"/> did, for the one line a run prints.</summary>
         internal sealed class MoveReport
         {
-            public string Folder = "";
-            /// <summary>Files moved out of the catalog folder.</summary>
+            /// <summary>The folders files were moved back from.</summary>
+            public List<string> From = new List<string>();
+            /// <summary>Files moved back beside the catalog.</summary>
             public int Moved;
             /// <summary>Files that could not be moved (another program holds them). They stay, and are still read.</summary>
             public List<string> Held = new List<string>();
-            /// <summary>Names held in BOTH folders: the older copy was kept as <c>&lt;name&gt;.moved-&lt;time&gt;</c> beside the live one.</summary>
+            /// <summary>Names held in BOTH places: the older copy was kept beside the live one as <c>&lt;name&gt;.moved-&lt;time&gt;</c>.</summary>
             public List<string> Renamed = new List<string>();
-            /// <summary>Every name that moved, in the order it moved. Anything beside the catalog named <c>mbxmoods-*</c> is taken
-            /// for truedat's, a file a person made included, so the run writes these down (<see cref="MovedNames"/>).</summary>
+            /// <summary>Every name that moved, in the order it moved.</summary>
             public List<string> MovedNames = new List<string>();
             public bool Anything { get { return Moved > 0 || Held.Count > 0; } }
         }
 
         /// <summary>
-        /// Move this library's working files out of the catalog folder into the work folder — a WRITING run's first act,
-        /// before it reads any of them, so the error ledger it consults and the backups it rotates are the ones that were
-        /// already there. Nothing is ever written over: when both folders hold a name, the NEWER file is the live one and
-        /// the other is kept beside it as <c>&lt;name&gt;.moved-&lt;time&gt;</c>. A file another program holds stays where
-        /// it is, is still read from there, and is reported. Never throws.
+        /// Put this library's working files back beside the catalog, from the folder the EV6.2 build moved them into — a WRITING
+        /// run's first act, before it reads any of them, so the error list it consults and the backups it rotates are the ones that
+        /// were already there. Nothing is ever written over: when both places hold a name, the NEWER file is the live one and the
+        /// other is kept beside it as <c>&lt;name&gt;.moved-&lt;time&gt;</c>. A file another program holds stays where it is, is
+        /// still read from there, and is reported. Once a folder holds none of this library's files its owner marker goes, and a
+        /// <c>libraries\&lt;id&gt;</c> folder left empty is removed; the locator beside the catalog (and beside the store) goes once
+        /// nothing is left. Never throws.
         /// </summary>
-        internal static MoveReport MoveExisting(string catalogPath, string? storePath)
+        internal static MoveReport MoveBack(string catalogPath, string? storePath)
         {
             var report = new MoveReport();
             string cat;
             try { cat = Norm(Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? "."); }
             catch { return report; }
-            var work = For(cat);
-            report.Folder = work;
-            if (Same(work, cat) || !Directory.Exists(cat)) return report;
-            if (SameEntry(work, cat)) return report;   // the same folder by another name: nothing to move (review #14)
+            if (!Directory.Exists(cat)) return report;
 
             string catalogName = Path.GetFileName(catalogPath);
             string sidecarName = Path.GetFileName(Path.ChangeExtension(catalogPath, ".mbxs"));
@@ -518,62 +381,85 @@ namespace Truedat
             string storeName = global::Truedat.Store.StoreLocation.FileName;
             if (!string.IsNullOrEmpty(storePath))
             {
+                try { storeName = Path.GetFileName(storePath!); } catch { }
+            }
+
+            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture);
+            var folders = LegacyFolders(cat);
+            foreach (var old in folders)
+            {
+                report.From.Add(old);
+                lock (Gate)
+                {
+                    if (!MovedFrom.TryGetValue(cat, out var list)) MovedFrom[cat] = list = new List<string>();
+                    if (!list.Contains(old, StringComparer.OrdinalIgnoreCase)) list.Add(old);
+                }
+                string[] names;
+                try { names = Directory.GetFiles(old); } catch { continue; }
+                Array.Sort(names, StringComparer.OrdinalIgnoreCase);
+                bool left = false;
+                foreach (var src in names)
+                {
+                    var name = Path.GetFileName(src);
+                    if (!IsWorkingFile(name, catalogName, sidecarName, companion, storeName)) continue;
+                    List<string> keptPaths; lock (Gate) keptPaths = Kept.ToList();
+                    if (keptPaths.Any(k => SameEntry(k, src))) { left = true; continue; }   // a file this run was handed stays where it was given
+                    var dest = Path.Combine(cat, name);
+                    try
+                    {
+                        if (File.Exists(dest))
+                        {
+                            if (!CanTake(src)) { report.Held.Add(name); left = true; continue; }
+                            bool incomingIsNewer = File.GetLastWriteTimeUtc(src) > File.GetLastWriteTimeUtc(dest);
+                            var aside = Unique(Path.Combine(cat, name + MovedSuffix + stamp));
+                            if (incomingIsNewer)
+                            {
+                                File.Move(dest, aside);
+                                if (MoveOne(src, dest)) { report.Moved++; report.Renamed.Add(name); report.MovedNames.Add(name + " (the older copy beside the catalog kept as " + Path.GetFileName(aside) + ")"); }
+                                else { File.Move(aside, dest); report.Held.Add(name); left = true; }
+                            }
+                            else if (MoveOne(src, aside)) { report.Moved++; report.Renamed.Add(name); report.MovedNames.Add(name + " (older than the copy beside the catalog, kept as " + Path.GetFileName(aside) + ")"); }
+                            else { report.Held.Add(name); left = true; }
+                        }
+                        else if (MoveOne(src, dest)) { report.Moved++; report.MovedNames.Add(name); }
+                        else { report.Held.Add(name); left = true; }
+                    }
+                    catch (Exception) { report.Held.Add(name); left = true; }
+                }
+                if (left) continue;
+                // Nothing of this library's is left there: its marker goes, and a folder that existed only for it goes too.
+                try { var marker = Path.Combine(old, LegacyOwnerMarkerName); if (File.Exists(marker)) File.Delete(marker); } catch { }
                 try
                 {
-                    var sd = Path.GetDirectoryName(Path.GetFullPath(storePath!));
-                    if (!string.IsNullOrEmpty(sd) && Same(Norm(sd!), cat)) storeName = Path.GetFileName(storePath!);
+                    var exe = Norm(_exeDir);
+                    var libs = Path.Combine(exe, LegacyLibrariesDir);
+                    if (Same(Norm(Path.GetDirectoryName(old) ?? ""), Norm(libs)) && !Directory.EnumerateFileSystemEntries(old).Any())
+                    {
+                        Directory.Delete(old);
+                        if (Directory.Exists(libs) && !Directory.EnumerateFileSystemEntries(libs).Any()) Directory.Delete(libs);
+                    }
                 }
                 catch { }
             }
 
-            string[] names;
-            try { names = Directory.GetFiles(cat); } catch { return report; }
-            Array.Sort(names, StringComparer.OrdinalIgnoreCase);
-            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture);
-            foreach (var src in names)
+            if (report.Held.Count == 0)
             {
-                var name = Path.GetFileName(src);
-                if (!IsWorkingFile(name, catalogName, sidecarName, companion, storeName)) continue;
-                List<string> keptPaths; lock (Gate) keptPaths = Kept.ToList();
-                // A file this run was handed stays where it was given (review #8) — by identity, not spelling (#14): the same archive
-                // named through a mapped drive, a junction or an 8.3 name is still the run's own input.
-                if (keptPaths.Any(k => SameEntry(k, src))) continue;
-                if (!Ensure(work)) return report;
-                var dest = Path.Combine(work, name);
-                try
-                {
-                    if (File.Exists(dest) && SameEntry(src, dest)) continue;   // one file reached by two names: not a collision (review #14)
-                    if (File.Exists(dest))
-                    {
-                        // Both folders hold this name. The newer one is the live file; the other keeps its content under a
-                        // name nothing reads, beside the live one. Ties go to the one already in the work folder.
-                        if (!CanTake(src)) { report.Held.Add(name); continue; }
-                        bool incomingIsNewer = File.GetLastWriteTimeUtc(src) > File.GetLastWriteTimeUtc(dest);
-                        var aside = Unique(Path.Combine(work, name + MovedSuffix + stamp));
-                        if (incomingIsNewer)
-                        {
-                            File.Move(dest, aside);
-                            if (MoveOne(src, dest)) { report.Moved++; report.Renamed.Add(name); report.MovedNames.Add(name + " (the older copy, already in the work folder, kept as " + Path.GetFileName(aside) + ")"); }
-                            else { File.Move(aside, dest); report.Held.Add(name); }
-                        }
-                        else if (MoveOne(src, aside)) { report.Moved++; report.Renamed.Add(name); report.MovedNames.Add(name + " (older than the copy in the work folder, kept as " + Path.GetFileName(aside) + ")"); }
-                        else report.Held.Add(name);
-                    }
-                    else if (MoveOne(src, dest)) { report.Moved++; report.MovedNames.Add(name); }
-                    else report.Held.Add(name);
-                }
-                catch (Exception) { report.Held.Add(name); }
+                // The locator only ever pointed at the folder this undoes. Beside the catalog, and beside a store kept elsewhere.
+                var locators = new List<string> { Path.Combine(cat, LegacyLocatorFileName) };
+                try { if (!string.IsNullOrEmpty(storePath)) locators.Add(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(storePath!)) ?? cat, LegacyLocatorFileName)); } catch { }
+                foreach (var loc in locators)
+                    try { if (File.Exists(loc) && ReadLocator(loc, cat) != null) File.Delete(loc); } catch { }
             }
             return report;
         }
 
-        /// <summary>The one line a writing run prints about the move; null when nothing was there to move.</summary>
+        /// <summary>The one line a writing run prints about the move back; null when nothing was there to move.</summary>
         internal static string? Describe(MoveReport r)
         {
             if (!r.Anything) return null;
-            var line = $"Work folder: moved {r.Moved:N0} working file{(r.Moved == 1 ? "" : "s")} out of the catalog folder into {r.Folder}";
-            if (r.Renamed.Count > 0) line += $"; {r.Renamed.Count:N0} name{(r.Renamed.Count == 1 ? " was" : "s were")} in both folders, the older copy kept as <name>{MovedSuffix}<time>";
-            if (r.Held.Count > 0) line += $"; {r.Held.Count:N0} held by another program and left in the catalog folder, still read from there ({string.Join(", ", r.Held)})";
+            var line = $"Working files: moved {r.Moved:N0} file{(r.Moved == 1 ? "" : "s")} back beside the catalog from {string.Join(", ", r.From)}";
+            if (r.Renamed.Count > 0) line += $"; {r.Renamed.Count:N0} name{(r.Renamed.Count == 1 ? " was" : "s were")} in both places, the older copy kept as <name>{MovedSuffix}<time>";
+            if (r.Held.Count > 0) line += $"; {r.Held.Count:N0} held by another program and left where they are, still read from there ({string.Join(", ", r.Held)})";
             return line;
         }
 
@@ -582,7 +468,7 @@ namespace Truedat
         {
             var lines = new List<string>();
             if (r.MovedNames.Count == 0) return lines;
-            lines.Add($"Work folder: moved from {catalogDir} into {r.Folder}:");
+            lines.Add($"Working files: moved back from {string.Join(", ", r.From)} into {catalogDir}:");
             foreach (var n in r.MovedNames) lines.Add("    " + n);
             return lines;
         }
@@ -662,20 +548,6 @@ namespace Truedat
         }
 
         /// <summary>The folder exists and a file can be written in it. Remembered once true.</summary>
-        static bool Ensure(string dir)
-        {
-            lock (Gate) { if (Created.Contains(dir)) return true; }
-            try
-            {
-                Directory.CreateDirectory(dir);
-                var probe = Path.Combine(dir, ".truedat-work-probe-" + Guid.NewGuid().ToString("N"));
-                File.WriteAllBytes(probe, new byte[] { 0 });
-                File.Delete(probe);
-            }
-            catch (Exception) { return false; }
-            lock (Gate) { Created.Add(dir); }
-            return true;
-        }
 
         /// <summary>A folder's full path without a trailing separator — except a drive root, which keeps its own (review #6): "C:" is
         /// not the root of C but the current directory OF drive C, so a trimmed root sent the move and every path built on it into

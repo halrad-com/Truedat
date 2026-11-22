@@ -78,7 +78,7 @@ namespace Truedat
                 foreach (var kv in files) File.WriteAllText(kv.Key, kv.Value);
                 foreach (var verb in new[] { "--reset", "--clear" })
                 {
-                    var output = RunChild(exe, lib, "--no-config " + Q(xml) + " --no-store " + verb + " --work-dir " + Q(work), out int exit);
+                    var output = RunChild(exe, lib, "--no-config " + Q(xml) + " --no-store " + verb, out int exit);
                     File.WriteAllText(Path.Combine(root, "refused" + verb + ".log"), output);
                     var moved = files.Where(kv => !File.Exists(kv.Key) || File.ReadAllText(kv.Key) != kv.Value).Select(kv => Path.GetFileName(kv.Key)).ToList();
                     bool ok = exit == 2 && moved.Count == 0 && !Directory.Exists(work);
@@ -113,7 +113,7 @@ namespace Truedat
                     var snap = Path.Combine(lib, "mbxmoods-snapshot-20261122.000000.zip");
                     CatalogArchive.WriteSnapshot(catalog, null, snap, "selftest");
                     File.WriteAllText(catalog, "{\"version\":1,\"generatedBy\":\"changed since the snapshot\",\"tracks\":{}}");
-                    var output = RunChild(exe, lib, "--no-config --no-store --restore " + Q(snap) + " --moods " + Q(catalog) + " --work-dir " + Q(work), out int exit);
+                    var output = RunChild(exe, lib, "--no-config --no-store --restore " + Q(snap) + " --moods " + Q(catalog), out int exit);
                     File.WriteAllText(Path.Combine(root, "input.log"), output);
                     Check(exit == 0 && File.ReadAllText(catalog) == Good,
                         $"restore-input #8: a restore by absolute path from the catalog folder, with a work folder elsewhere, restores (exit {exit})");
@@ -371,7 +371,7 @@ namespace Truedat
                 // kept by both
                 ("mbxmoods-snapshot-20260101-000000.zip", K, K, "a snapshot"), ("mbxmoods-reset-20260101-000000.zip", K, K, "an earlier reset archive"),
                 ("MBXMOODS-RESET-20260101-000000.ZIP", K, K, "an earlier reset archive, whatever the case"), ("mbxmoods-clear-20260101-000000.zip", K, K, "an earlier clear archive"),
-                (TruedatConfig.FileName, K, K, "the config file"), ("mbxmoods-schema.json", K, K, "the field registry"),
+                (TruedatConfig.FileName, K, T, "the config file"), ("mbxmoods-schema.json", K, K, "the field registry"),
                 (ExclusionStore.FileName + ExclusionStore.LockFileSuffix, K, K, "the rules' lock file (a mechanism, never deleted)"),
             };
             foreach (var r in rows)
@@ -882,9 +882,9 @@ namespace Truedat
                 var resetRefused = RunChild(exe, lib, common + " --reset", out int resetRefusedExit);
                 File.WriteAllText(Path.Combine(root, "reset-refused.log"), resetRefused);
                 Check(resetRefusedExit == 2 && resetRefused.Contains("RESET"), $"reset-cli: without a confirmation the run is refused with exit 2 (got {resetRefusedExit})");
-                var warn = resetRefused.Split('\n').FirstOrDefault(l => l.Contains("removes your exclusion rules")) ?? "";
+                var warn = resetRefused.Split('\n').FirstOrDefault(l => l.Contains("removes your settings, exclusion rules")) ?? "";
                 Check(warn.Contains("duplicate verdicts") && warn.Contains("--clear"),
-                    $"reset-cli: one line says it removes the exclusion rules and the duplicate verdicts, and that --clear keeps them ({warn.Trim()})");
+                    $"reset-cli: one line says it removes your settings, the exclusion rules and the duplicate verdicts, and that --clear keeps them ({warn.Trim()})");
                 Check(rules.Keys.All(k => resetRefused.Contains(Path.Combine(lib, k))), "reset-cli: and the files it found are named");
                 Check(resetRefused.Contains("ignore"), "reset-cli: the text says the review list's ignore decisions go too");
                 Check(Unchanged() && Archives(ResetCommand.ArchivePrefix) + Archives(ResetCommand.ClearArchivePrefix) == 0,
@@ -968,7 +968,7 @@ namespace Truedat
                     File.WriteAllText(leftover, "a summary an earlier build left beside the catalog");
                     var elsewhere = Path.Combine(root, "elsewhere");
                     // Named by its bare file name, as the hints print it: finding it is what used to settle the work folder.
-                    var blocked = RunChild(exe, lib, "--no-config --no-store --restore " + Q(Path.GetFileName(resetZips[0])) + " --moods " + Q(catalog) + " --work-dir " + Q(elsewhere), out int blockedExit);
+                    var blocked = RunChild(exe, lib, "--no-config --no-store --restore " + Q(Path.GetFileName(resetZips[0])) + " --moods " + Q(catalog), out int blockedExit);
                     File.WriteAllText(Path.Combine(root, "restore-blocked.log"), blocked);
                     Check(blockedExit != 0 && blocked.Contains(newer), $"reset-restore-cli: a rule file that exists now stops the restore, named (exit {blockedExit})");
                     Check(File.ReadAllText(newer) == "a newer decision" && (File.Exists(catalog) ? File.ReadAllBytes(catalog) : new byte[0]).SequenceEqual(catalogBefore),
@@ -1000,7 +1000,7 @@ namespace Truedat
                     var plain = Path.Combine(root, "plain-copy.json");
                     File.WriteAllBytes(plain, clearedCatalog);
                     var fresh = Path.Combine(root, "elsewhere-plain");
-                    var plainOut = RunChild(exe, lib, "--no-config --no-store --restore " + Q(plain) + " --moods " + Q(catalog) + " --work-dir " + Q(fresh), out int plainExit);
+                    var plainOut = RunChild(exe, lib, "--no-config --no-store --restore " + Q(plain) + " --moods " + Q(catalog), out int plainExit);
                     File.WriteAllText(Path.Combine(root, "restore-plain.log"), plainOut);
                     Check(plainExit == 0 && File.Exists(catalog) && File.ReadAllBytes(catalog).SequenceEqual(clearedCatalog),
                         $"restore-cli: a plain catalog restored by full path into a library with an unsettled work folder lands, byte for byte (exit {plainExit})");
@@ -1081,7 +1081,7 @@ namespace Truedat
         {
             var start = new ProcessStartInfo
             {
-                FileName = exe, WorkingDirectory = cwd, Arguments = WorkFolderSelfTest.ChildArgs(exe, cwd, args),
+                FileName = exe, WorkingDirectory = cwd, Arguments = args,
                 UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
             };

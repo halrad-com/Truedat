@@ -315,7 +315,7 @@ namespace Truedat.Store
             var start = new ProcessStartInfo
             {
                 FileName = typeof(Program).Assembly.Location, WorkingDirectory = f.Directory,
-                Arguments = WorkFolderSelfTest.ChildArgs(typeof(Program).Assembly.Location, f.Directory, "--no-config --store " + Quote(f.Store) + " --moods " + Quote(f.Catalog) + " " + verb),
+                Arguments = "--no-config --store " + Quote(f.Store) + " --moods " + Quote(f.Catalog) + " " + verb,
                 UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
             };
             using var child = Process.Start(start) ?? throw new InvalidOperationException("Could not start the remap test child.");

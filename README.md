@@ -26,28 +26,19 @@ Minor utility modes (`--synthesize`, `--seed-moods`) cover synthetic-library gen
 - `mbxmoods-verify.csv` - per-entry status from `--verify` / `--verify --backfill` (OK / DRIFT / MISSING / NO_HASH / BACKFILLED / REANALYZE_NEEDED / ERROR, plus the list of fields filled per entry)
 - `truedat.log` - full console output for diagnostics (when `--audit` is used)
 
-**Where the files go.** What MBXHub reads stays beside the catalog: `mbxmoods.json` (and its numbered
-parts), the `.mbxs` sidecar, `mbxedges.v1.json`, the store `truedat.db` and every `store-*.json`
-record. So do your own files: `mbxmoods-exclude.json`, `apply-result.json` beside it, and the
-`--duplicates` report with the verdicts you keep on it. Everything else truedat writes is a
-**working file** and goes to the **work folder**: the error, skip and verify lists, `truedat.log`,
-the saved scan summaries, the catalog's and the store's backups, snapshots, clear and reset archives, and the
-`--list-*` reports.
+**Where the files go.** Everything truedat writes for a library goes beside that library's catalog:
+the catalog and its numbered parts, the `.mbxs` sidecar, `mbxedges.v1.json`, the store `truedat.db`,
+every `store-*.json` record, the error, skip and verify lists, `truedat.log`, the saved scan summaries,
+backups, snapshots and clear or reset archives. Each library keeps its own files with it.
 
-The work folder is the folder `truedat.exe` is in when truedat is installed in the library (the
-usual `Library\truedat\truedat.exe`, or the library folder itself). Run from anywhere else, it is
-`<exe folder>\libraries\<library id>\` — one folder per library, so one install serving two
-libraries never mixes their lists. `--work-dir <dir>` (config key `work-dir`) names it yourself. If
-the work folder cannot be written, truedat says so in one line and keeps the working files beside
-the catalog, as earlier builds did. `truedat --paths` shows the folder and why.
-
-Files an earlier build left beside the catalog move to the work folder on the next run that writes
-any (a scan, or any verb that changes the catalog): a rename, or a copy that is checked by size and
-hash before the original goes. Nothing is written over — if both folders hold a name, the newer file
-is kept and the other is kept beside it as `<name>.moved-<time>`. A file another program holds stays
-where it is and is still read from there. The read-only verbs (`--stats`, `--store-info`,
-`--list-review`, `--paths`, `--preview`) move nothing and create no folder; they look in the work
-folder first and beside the catalog second.
+0.5.5.4-EV6.2 moved the working files (the lists, summaries, logs, backups and archives) into a folder
+by the exe (`Library\truedat\`, or `<exe folder>\libraries\<library id>\`). That is undone: the next
+run that writes (a scan, or any verb that changes the catalog) moves them back beside the catalog and
+removes the folder's marker file and `truedat-work-folder.json`. Nothing is written over — if both
+places hold a name, the newer file is kept and the other is kept beside it as `<name>.moved-<time>`.
+A file another program holds stays where it is and is still read from there. The read-only verbs
+(`--stats`, `--store-info`, `--list-review`, `--paths`, `--preview`) move nothing; they look beside
+the catalog first and in that folder second.
 
 ## Download
 
@@ -66,12 +57,11 @@ read, nothing is re-analysed). To add edges to the tracks already in it — a fu
 `truedat --refresh` when you choose to.
 
 **Already have a store from an earlier build** — just run `truedat`. It upgrades the store on open and
-writes `truedat.db.bak.v<N>.<timestamp>` first (in the work folder when the store is beside the catalog).
+writes `truedat.db.bak.v<N>.<timestamp>` beside it first.
 
-**Working files from an earlier build** — the first scan moves the error and skip lists, scan summaries,
-logs and backups out of the catalog folder into the work folder (see *Where the files go* above),
-and goes on reading them from there: tracks that failed before are still skipped, and backup rotation
-still counts every backup.
+**Working files from 0.5.5.4-EV6.2** — the first scan moves the error and skip lists, scan summaries,
+logs and backups back beside the catalog (see *Where the files go* above): tracks that failed before
+are still skipped, and backup rotation still counts every backup.
 
 **New library** — run `truedat`. The first scan builds the catalog, the store and the edges in one pass.
 
@@ -109,8 +99,7 @@ written over, is read back and checked before it counts, and is never made from 
 backups never rotates the full ones out: rotation also keeps the newest N that are at least
 half the size of the largest. `--restore` keeps a damaged catalog it replaces as
 `mbxmoods.json.damaged.<ts>.zip`, outside the rotation. The same count keeps the saved scan
-summaries (`mbxmoods-scan-<date>-<n>.txt`). Backups, summaries and snapshots are working files: they
-are written to the work folder, and rotation counts the ones in both folders.
+summaries (`mbxmoods-scan-<date>-<n>.txt`).
 
 `--snapshot [path]` is a deliberate, read-only capture: it bundles the current catalog, a
 manifest (track count + content SHA-256 for verification), and the `mbxmoods-exclude.json`
@@ -118,7 +107,7 @@ policy file into one restorable, double-clickable `mbxmoods-snapshot-<ts>.zip`. 
 <archive>` rebuilds `mbxmoods.json` from a snapshot, a compressed backup, a `.gz`, or a plain
 catalog — the format is auto-detected, so older plain-copy backups restore too — and it backs
 up whatever it's about to overwrite first, so a restore is itself reversible. An archive named
-by its file name alone is looked for in the work folder and beside the catalog. (The live
+by its file name alone is looked for beside the catalog. (The live
 `mbxmoods.json` MBXHub reads stays plain JSON; only backups and snapshots are compressed.)
 
 **With a store in force, the snapshot carries the store too** — the catalog is derived, the store
@@ -145,9 +134,8 @@ truedat --clear     a clean slate that keeps how you have it set up
 truedat --reset     the full reset: your rules and decisions go too
 ```
 
-Each puts the files it takes — beside the catalog and in the work folder — into one zip in the work
-folder (`mbxmoods-clear-<time>.zip` or `mbxmoods-reset-<time>.zip`; the work folder's files sit under
-`work/` inside it), removes them, and then runs the normal library scan from nothing, so every track
+Each puts the files it takes into one zip beside the catalog (`mbxmoods-clear-<time>.zip` or
+`mbxmoods-reset-<time>.zip`), removes them, and then runs the normal library scan from nothing, so every track
 is analyzed again. Nothing is removed until the zip has been written and read back; there is no way to
 skip it. Each lists the files and asks you to type its word first (`CLEAR` or `RESET`). `--imeanit`
 confirms either instead when nobody is at the console (a script, a scheduled task). Without one or the
@@ -159,10 +147,13 @@ other it stops and changes nothing.
 | The review list | archived; your `ignore` decisions are carried into a new review list, unchanged | archived, then removed — `ignore` decisions included |
 | Your own files: `mbxmoods-exclude.json` (and its backups and playlist), `apply-result.json`, `mbxmoods-duplicates.verdicts.json` | **kept** | archived, then removed |
 | Earlier snapshots and clear or reset archives | kept | kept |
-| The config file and the field registry | kept | kept |
+| The config file (`truedat.config.json`, beside the exe) | kept | archived, then removed (not with `--no-config`) |
+| The field registry | kept | kept |
 
-`--reset` used to keep the exclusion rules; it no longer does. Its confirmation says so on a line of its
-own before it asks, names the files it found, and points to `--clear` as the one that keeps them.
+`--reset` used to keep the exclusion rules and the config file; it no longer does. Its confirmation says
+so on a line of its own before it asks, names the files it found, and points to `--clear` as the one that
+keeps them. `--restore` of a reset archive puts the config file back beside the exe, and refuses while
+one is there.
 
 What to expect:
 
@@ -183,7 +174,7 @@ What to expect:
   and if it is started while the catalog is absent it shows no moods; either way, use Reload mood
   data in MBXHub (or restart MusicBee) once the scan has finished. Closing MusicBee first avoids both.
 - To go back, `truedat --restore mbxmoods-clear-<time>.zip` (or `mbxmoods-reset-<time>.zip`) restores
-  the catalog (the bare name is found in the work folder). If the library had a store, add `--store`
+  the catalog. If the library had a store, add `--store`
   so the store is restored and the catalog published from it (without it the run restores the catalog
   alone and tells you the archive holds a store). A reset archive's rule files are put back beside the
   catalog as well, byte for byte; if one of them exists now, the restore stops first, names it and
@@ -403,7 +394,7 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           compressed .bak.<timestamp>.zip before atomic replace. Example:
                           truedat --fixup --remap "D:\Music\=\\nas\share\Music\" mbxmoods.json
   --verify                Recompute audioStreamSha256 per entry, report drift / missing
-                          (read-only; writes mbxmoods-verify.csv to the work folder)
+                          (read-only; writes mbxmoods-verify.csv beside the catalog)
   --verify --backfill     Fill in missing fields for entries whose audio bytes are
                           unchanged. Drifted entries are flagged as REANALYZE_NEEDED,
                           never modified. No Essentia re-run. Idempotent. Two tiers,
@@ -536,13 +527,13 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           concurrent shards would overwrite each other's backfills.
   --retry-errors          Re-attempt all previously failed files (clears error log)
   --clear                 Start over and keep how it is set up: archive truedat's analysis for this
-                          library into mbxmoods-clear-<time>.zip (in the work folder), remove it, then
+                          library into mbxmoods-clear-<time>.zip, remove it, then
                           scan from nothing. Keeps your settings, exclusion rules, apply-result.json,
                           duplicate verdicts and the review list's ignore decisions. Asks you to type
                           CLEAR first. Library scan only.
   --reset                 The full reset: what --clear does, and it also archives and removes your
-                          exclusion rules, apply-result.json, duplicate verdicts and ignore decisions,
-                          into mbxmoods-reset-<time>.zip. Keeps the config file. Asks you to type RESET
+                          settings (the config file), exclusion rules, apply-result.json, duplicate
+                          verdicts and ignore decisions, into mbxmoods-reset-<time>.zip. Asks you to type RESET
                           first. Library scan only.
   --imeanit               Confirms --clear or --reset when nobody is at the console to type the word.
   --migrate               Clean up mbxmoods.json: strip legacy fields (valence/arousal,
@@ -552,7 +543,7 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
   --snapshot [path]       Read-only: bundle the current catalog into a restorable, double-
                           clickable ZIP — mbxmoods.json + a manifest (trackCount, content
                           SHA-256, byte size) + mbxmoods-exclude.json when present. Default
-                          output mbxmoods-snapshot-<timestamp>.zip in the work folder. With a
+                          output mbxmoods-snapshot-<timestamp>.zip beside the catalog. With a
                           store in force the store rides along as a consistent VACUUM INTO
                           copy, so the archive restores the authority and not just the files.
   --restore <archive>     Rebuild mbxmoods.json from a snapshot, a compressed backup, a .gz,
@@ -583,12 +574,6 @@ truedat.exe <path-to-iTunes-Music-Library.xml> [options]
                           / --merge-moods / --migrate (rotation, never truncation; 0 = keep
                           all; default 2). Backups are compressed .zip. Also how many saved
                           scan summaries are kept.
-  --work-dir <dir>        Where truedat's working files go: the error, skip and verify lists,
-                          truedat.log, scan summaries, backups, snapshots and reset archives.
-                          Default: the exe's folder when truedat is installed in the library,
-                          else <exe folder>\libraries\<library id>. The catalog, sidecar, edges
-                          file, store, store-*.json and your own files stay beside the catalog.
-                          Also a config key (work-dir).
   --output <path>         --hash-only mode: append identity envelopes as NDJSON to <path>
   --hash-only             Identity-only mode (no Essentia). Requires --level, --file-list, --output
   --level <name>          With --hash-only: 'fingerprint' (cheap composite) or 'stream' (durable SHA-256)
@@ -743,7 +728,7 @@ For large libraries (50K+ tracks), expect multi-day scans for mood analysis. The
 - **Cross-path resilient** - File moved or renamed? The cross-SHA fallback re-keys the cached entry to the new path without re-analyzing.
 - **Multi-machine chunking** - Two boxes pointed at the same library run `--chunk 1/2` and `--chunk 2/2` and produce hostname-suffixed shards (`mbxmoods.<host>.json`); merge later with `--merge-moods`. Shards run without a store (a store-backed `--chunk` is refused), so the merge takes the shard catalogs; a store can also be a source — read across every root, carrying descriptions and copy facts but not edge rows or history. Hash-mod assignment means the iTunes XMLs need not be identical between machines. Each shard's `mbxmoods-skipped.<host>.csv` holds only that shard's own tracks, so the ledgers add up to the library instead of repeating it N times; per-rule exclusion hit counts are the deliberate exception — they are library-wide and identical on every machine, which is what makes a `0 matched` reading trustworthy, and the console says so under `--chunk`.
 - **Resumable** - Stop and restart anytime. Progress is saved every 5 minutes, so an interrupted scan loses minutes of work rather than an unpredictable number of tracks. A second Ctrl+C, a closed console window, logoff or shutdown saves what has completed — fresh analyses and cache-only updates alike — before the process ends, with one owner for that save however many stop signals arrive, and the scan's record (`store-result.json`) is sealed with what happened, so a stopped run never reads as completed; only a hard kill falls back to the last 5-minute save.
-- **The summary is kept** - The end-of-scan summary is saved in the work folder as `mbxmoods-scan-<start date>-<n>.txt` (`n` = the scan's number that day), exactly as printed, with a `Workers:` line naming the worker count and where it came from. Config key `scan-summary` set to `false` turns the file off.
+- **The summary is kept** - The end-of-scan summary is saved beside the catalog as `mbxmoods-scan-<start date>-<n>.txt` (`n` = the scan's number that day), exactly as printed, with a `Workers:` line naming the worker count and where it came from. Config key `scan-summary` set to `false` turns the file off.
 - **Verifiable** - `truedat --verify` walks the moods file and confirms each entry's `audioStreamSha256` still matches disk, writing `mbxmoods-verify.csv` and exiting 1 on any drift / missing / error (CI-friendly). FLAC entries hashed by pre-2026-07 builds are recognized via a legacy-region compare in the same read and upgraded in place under `--backfill` (`audioStreamSha256-upgraded`); FLACs whose tags were rewritten *before* upgrading are re-keyed automatically during a normal scan (props-gated, reported as `FLAC re-key`), or by `--verify --backfill --accept-flac-tag-drift` without a scan. `--backfill` repairs missing fields in place with no Essentia re-run: the identity tier (TagLib-driven, fast) and the features tier (ffmpeg-driven, ~30 s per applicable lossless 24-bit track) both run by default — narrow with `--backfill-level identity|features`. Every tier is gated by the drift check, so drifted entries are flagged `REANALYZE_NEEDED` rather than touched.
 - **ETA tracking** - Each per-track line shows the count, the percent, the estimated time left and how many workers are busy (`[7945/7962 97% ETA 5m02s · ess 19/20] Artist - Title`). The per-track cost and the throughput (`Nx realtime` — audio-seconds analyzed per wall-second, with MB/s as a footnote) are in the end-of-scan summary, not repeated on every line. Duration is the honest unit: a FLAC and a low-bitrate MP3 of the same content cost the same to scan, and the numerator is what was actually decoded. The estimate is two-class aware — tracks new to the catalog are costed by audio duration at the measured real-time factor, already-cataloged ones at the measured cache-hit average — and nothing is shown until something has been measured. A track at or past `--long-track-mins` (default 30) carries its duration on its own progress line (`... - II [1h47m]`). The end-of-scan summary leads with the scan-wide realtime factor and breaks down count and average cost per outcome class.
 - **Error resilience** - Failed tracks logged to errors CSV, skipped on retry.
