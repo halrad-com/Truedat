@@ -50,6 +50,7 @@ namespace Truedat
                 Names(assert, Path.Combine(root, "names"));
                 DriveRoots(assert, Path.Combine(root, "roots"));
                 CustomCatalog(assert, Path.Combine(root, "custom"));
+                CrossVolumeRace(assert, Path.Combine(root, "race"));
                 Settings(assert);
             }
             catch (Exception ex) { assert(false, $"work folder: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -608,6 +609,36 @@ namespace Truedat
                 assert(gone.Count == 0 && r.Moved == 1, $"work custom catalog (split): the move keeps every numbered part and the sidecar by the catalog's real name ({r.Moved} moved{(gone.Count > 0 ? "; lost: " + string.Join(", ", gone) : "")})");
                 WorkFolder.Configure(null, AppDomain.CurrentDomain.BaseDirectory);
             }
+        }
+
+        /// <summary>The cross-volume move when another writer creates the destination first (review #13). The copy refused to overwrite
+        /// it, and the cleanup then deleted the destination because both files existed — the OTHER writer's file. A "\\?\" spelling of
+        /// the same folder has a different path root, so the move takes its copy branch here without a second volume.</summary>
+        static void CrossVolumeRace(Action<bool, string> assert, string root)
+        {
+            var src = Path.Combine(root, "catalog", "mbxmoods-errors.csv");
+            var destDir = Path.Combine(root, "work");
+            Directory.CreateDirectory(Path.GetDirectoryName(src)!); Directory.CreateDirectory(destDir);
+            File.WriteAllText(src, "this run's ledger");
+            var dest = Path.Combine(destDir, "mbxmoods-errors.csv");
+            File.WriteAllText(dest, "the other writer's ledger");
+            var destOtherRoot = @"\\?\" + dest;
+            assert(!string.Equals(Path.GetPathRoot(src), Path.GetPathRoot(destOtherRoot), StringComparison.OrdinalIgnoreCase),
+                $"work race: the fixture's destination has another path root, so the move copies ({Path.GetPathRoot(destOtherRoot)})");
+            var moveOne = typeof(WorkFolder).GetMethod("MoveOne", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            bool moved = moveOne != null && (bool)moveOne.Invoke(null, new object[] { src, destOtherRoot })!;
+            assert(File.Exists(dest) && File.ReadAllText(dest) == "the other writer's ledger",
+                "work race: a destination another writer made first is never deleted or written over");
+            assert(!moved && File.Exists(src) && File.ReadAllText(src) == "this run's ledger",
+                $"work race: the move reports it could not move, and this run's file stays where it was - both writers' data kept (moved {moved})");
+            var leftovers = Directory.GetFiles(destDir).Where(f => !string.Equals(f, dest, StringComparison.OrdinalIgnoreCase)).Select(Path.GetFileName).ToList();
+            assert(leftovers.Count == 0, $"work race: no staging file is left behind ({string.Join(", ", leftovers)})");
+
+            // The ordinary cross-volume move still works: copied whole, then the source removed.
+            File.Delete(dest);
+            moved = moveOne != null && (bool)moveOne.Invoke(null, new object[] { src, destOtherRoot })!;
+            assert(moved && !File.Exists(src) && File.ReadAllText(dest) == "this run's ledger"
+                   && Directory.GetFiles(destDir).Length == 1, $"work race: with nothing in the way the copy lands, verified, and the source goes (moved {moved})");
         }
 
         /// <summary>The flag and the config key are one spelling, and a reset may ride with it.</summary>

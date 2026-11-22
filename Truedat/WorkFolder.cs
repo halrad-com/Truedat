@@ -427,8 +427,15 @@ namespace Truedat
             catch (Exception) { return false; }
         }
 
-        /// <summary>Rename on one volume, copy-verify-delete across two. False when the file cannot be moved at all —
-        /// another program holds it, or the copy did not read back as written; the original is then left untouched.</summary>
+        /// <summary>Rename on one volume, copy-verify-publish-delete across two. False when the file cannot be moved at all —
+        /// another program holds it, the copy did not read back as written, or another writer made the destination first; the
+        /// original is then left untouched.</summary>
+        /// <remarks>Review #13: the copy used to go straight to the destination, and when it failed because another writer had created
+        /// that name after the existence check, the cleanup deleted the destination — the OTHER writer's file — because both files
+        /// existed. Now the copy goes to a staging name in the destination folder that only this process could have chosen, is
+        /// verified there (length and SHA-256), and is published with a move that never writes over a name; the source is deleted
+        /// last. The only file this ever deletes on failure is its own staging file, so a collision keeps both writers' data: theirs
+        /// at the name, ours where it was.</remarks>
         static bool MoveOne(string src, string dest)
         {
             if (!CanTake(src)) return false;
@@ -437,21 +444,27 @@ namespace Truedat
                 try { File.Move(src, dest); return true; }
                 catch (Exception) { return false; }
             }
+            var staging = Path.Combine(Path.GetDirectoryName(dest) ?? ".",
+                Path.GetFileName(dest) + ".truedat-move-" + Guid.NewGuid().ToString("N") + ".tmp");   // ".tmp": never moved or archived
+            bool stagingIsOurs = false;
             try
             {
-                File.Copy(src, dest, false);
-                File.SetLastWriteTimeUtc(dest, File.GetLastWriteTimeUtc(src));   // age decides rotation and the newer-wins rule
-                if (new FileInfo(src).Length != new FileInfo(dest).Length || Sha256(src) != Sha256(dest))
+                File.Copy(src, staging, false);
+                stagingIsOurs = true;
+                File.SetLastWriteTimeUtc(staging, File.GetLastWriteTimeUtc(src));   // age decides rotation and the newer-wins rule
+                if (new FileInfo(src).Length != new FileInfo(staging).Length || Sha256(src) != Sha256(staging))
                 {
-                    try { File.Delete(dest); } catch { }
+                    File.Delete(staging);
                     return false;
                 }
+                File.Move(staging, dest);    // no-overwrite: a destination another writer made meanwhile fails here and stays as it is
+                stagingIsOurs = false;       // published: the staging name no longer exists
                 File.Delete(src);
                 return true;
             }
             catch (Exception)
             {
-                try { if (File.Exists(dest) && File.Exists(src)) File.Delete(dest); } catch { }
+                if (stagingIsOurs) { try { File.Delete(staging); } catch { } }
                 return false;
             }
         }
