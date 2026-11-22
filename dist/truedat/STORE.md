@@ -11,7 +11,7 @@ behaves, and nothing is installed: truedat uses the SQLite that ships with Windo
 
 **Store only.** `truedat --config publish false` (or `--no-publish` for one run) makes the store the
 only output: no `mbxmoods.json`, sidecar or `mbxedges.v1.json` is written beside it. Files already
-there are kept once in `mbxmoods.json.retired.<time>.zip` (in the work folder — see README, *Where the files go*) and removed. Edges still go into the store,
+there are kept once in `mbxmoods.json.retired.<time>.zip` beside the catalog and removed. Edges still go into the store,
 and `--store-export` / `--edges-export` still write files when asked. `--publish` turns publishing back
 on for one run. Use it only with a hub that reads the store; a hub that reads the files sees nothing.
 
@@ -100,18 +100,14 @@ makes the migration refuse and roll back, naming the column, rather than round i
 
 **Backups of the store.** Every copy the store makes of itself before a change — a migration's
 `truedat.db.bak.v<N>.<stamp>`, an open-time repair's `.bak.roots.<stamp>`, a remap's `.bak.remap.<stamp>`,
-a restore's `truedat.db.bak.<ts>.db` — is a working file. A store beside the catalog writes them to the
-library's work folder, with the rest of truedat's working files; a store kept in a folder of its own
-(`--store-dir`, a network library's local store, a `--store` path outside the catalog folder) keeps
-them beside itself, as before.
-`--keep-backups` rotation counts the ones in both places. The store itself, its `-wal` / `-shm` and the
-`store-*.json` records never move.
+a restore's `truedat.db.bak.<ts>.db` — is written beside the store. `--keep-backups` rotation counts them
+there, and in the folder 0.5.5.4-EV6.2 used until the next scan moves them back.
 
 ## Verbs
 
 | Verb | Does |
 |---|---|
-| `--store-import` with `--moods <catalog>` | loads the catalog and its ledgers (the errors, skipped and verify lists and receipts from the work folder — or beside the catalog, from a build before the move — and the review ledger), idempotently, in batches; a ledger that has moved between the two is not imported twice; `--library-root <path>`, `--root-role primary|mirror|endpoint`, `--machine-adopt` |
+| `--store-import` with `--moods <catalog>` | loads the catalog and its ledgers (the errors, skipped and verify lists and receipts beside the catalog — or, before the next scan has moved them back, in the folder 0.5.5.4-EV6.2 used — and the review ledger), idempotently, in batches; `--library-root <path>`, `--root-role primary|mirror|endpoint`, `--machine-adopt` |
 | a scan, with a store in force | commits every entry it touched — analysed ones as producer `essentia@<build>` with one run row each, cache hits as copy facts — at each checkpoint and at the end, then publishes the catalog, sidecar and companion from the store; failures become failed runs. A stop (second Ctrl+C, console closed, logoff, shutdown) commits and publishes what has completed before the process ends |
 | `--store-export <out.json>` (`--export-root <root>`) | a catalog from the store through the unchanged writer — the same bytes a scan would write; `key-moves.json` beside it when a content hash was superseded |
 | `--store-roundtrip <catalog>` | per-entry byte equality of store against catalog, both through the catalog writer; exit 1 on any difference; `--audit` prints where the first difference is |
