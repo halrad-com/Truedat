@@ -670,8 +670,18 @@ namespace Truedat.Edges
                     $"the spill goes under the working root, not the store ({pendingDir})");
                 assert(!System.IO.Directory.Exists(Truedat.Store.ArtifactStore.ArtifactsDir(dir)),
                     "the store folder gets no artifacts\\ directory from a scan that spills");
+                // Review #20: only a fold that can be written lets the rest of the run treat that audio's edges as done.
+                assert(Truedat.Store.ScanSink.HasUsableFold(@"C:\stage\abc.flac"), "a stashed ok fold (re-keyed) is usable");
+                assert(!Truedat.Store.ScanSink.HasUsableFold(@"C:\stage\def.mp3"), "a failed fold is not usable: an identical copy later in the run must not skip its edges");
+                assert(!Truedat.Store.ScanSink.HasUsableFold(@"C:\stage\nosha.mp3"), "a discarded fold is not usable");
+                var shaOk = entries[@"D:\Music\Tool\a.flac"].AudioStreamSha256!;
+                var shaFailed = entries[@"D:\Music\Tool\b.mp3"].AudioStreamSha256!;
+                Program.NoteFreshEdges(shaOk); Program.NoteFreshEdges(shaFailed);   // as if both had been marked when analyzed
                 var r = Truedat.Store.ScanSink.Flush(store, "output-x64.5", entries.Keys);
                 assert(r.Ok && r.Edges == 1 && r.EdgesFailed == 1, $"the flush reports 1 edge row written and 1 failed fold ({r.Edges}, {r.EdgesFailed}, ok {r.Ok} {r.Error})");
+                assert(Program.EdgesFreshThisRun(shaOk), "an audio whose edges the flush wrote stays done for the rest of the run");
+                assert(!Program.EdgesFreshThisRun(shaFailed), "an audio whose edges the flush could not write is not done: the next identical copy gets its edges retried");
+                Program.ForgetFreshEdges(shaOk);
                 assert(System.IO.Directory.GetFiles(pendingDir, "*.edges").Length == 0, "the flush consumed every spilled fold");
                 using (var os = Truedat.Store.OpenStore.Open(store, false, "selftest", DateTime.UtcNow.ToString("o")))
                 {

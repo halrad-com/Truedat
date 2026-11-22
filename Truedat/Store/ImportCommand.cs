@@ -661,7 +661,7 @@ namespace Truedat.Store
             if (edges != null)
             {
                 // A lost spill is a store-side loss: its failed run is marked 'spill-lost' so the refresh gate still lists the track (TDA N1).
-                if (WriteEdges(dal, res.EntityId, contentKey, sha != null ? kind : "entity", sha, loc, edges, source, now, key, spillLost ? ScanSink.SpillLostComponent : "edges", r)) { r.Edges++; r.VisibleChanges++; } else r.EdgesFailed++;
+                if (WriteEdges(dal, res.EntityId, contentKey, sha != null ? kind : "entity", sha, loc, edges, source, now, key, spillLost ? ScanSink.SpillLostComponent : "edges", r)) { r.Edges++; r.VisibleChanges++; } else { r.EdgesFailed++; Program.ForgetFreshEdges(sha); }   // not done after all (review #20)
             }
         }
 

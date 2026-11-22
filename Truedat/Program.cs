@@ -2544,7 +2544,7 @@ namespace Truedat
             => HasCurrentFeatures(e?.Features)
                // The lacking-edges list is read once, when the scan begins; content this run has analyzed since is no longer lacking.
                && !(_refreshFeatures && _edgesStale != null && !string.IsNullOrEmpty(e?.AudioStreamSha256) && _edgesStale.Contains(e!.AudioStreamSha256!)
-                    && !_contentMeasuredThisRun.ContainsKey(e.AudioStreamSha256!))
+                    && !EdgesFreshThisRun(e.AudioStreamSha256))
                && !(_refreshAuthenticity && AuthenticityStale(e?.Features));
 
         /// <summary>Convert a path to the \\?\ extended-length form so managed IO on
@@ -6443,7 +6443,7 @@ namespace Truedat
             int cachedByHeadPath = 0;  // tier 1.5: same path, mtime drifted, head-64k evidence says tags-only
             int cachedByShaPath = 0;   // tier A: same path, mtime drifted, audio bytes unchanged
             int cachedByShaCross = 0;  // tier B: different path, audio bytes unchanged
-            int sameAudioReused = 0;   // of those, tracks left for the second pass that reused an analysis made in this run
+            int sameAudioReused = 0;   // cross-path hits whose analysis was made in THIS run, not an entry the catalog already held (review #22)
             int shaBackfilled = 0;     // tier 0 cache hits that gained audioStreamSha256 (legacy entries)
             int smfmAdded = 0;         // tracks that gained SMFM data this scan (file newly carries 12-TONE)
 
@@ -7089,6 +7089,7 @@ namespace Truedat
                                         ClearReviewRecord(t.Location);
                                         RemoveIfMoved(allTracks, xs.OldKey!);
                                         Interlocked.Increment(ref cachedByShaCross);
+                                        if (IsSameRunReuse(xs.Entry.AudioStreamSha256)) Interlocked.Increment(ref sameAudioReused);
                                         Interlocked.Increment(ref cachedCount);
                                         trackClass = "cached\u00b7sha\u00b7x";
                                         Console.WriteLine($"[{current}/{total} {pct}%{eta}] {t.Artist} - {t.Name} (cached\u00b7sha{crossShaSmfmTag})");
@@ -7273,6 +7274,8 @@ namespace Truedat
                         ClearReviewRecord(t.Location);
                         NoteFreshAnalysis(t.Location);
                         NoteFreshContent(audioStreamSha256);
+                        // Its edges count as done for the rest of the run only when the fold can be written (review #20).
+                        if (global::Truedat.Store.ScanSink.HasUsableFold(msStagedSrc!.Path)) NoteFreshEdges(audioStreamSha256);
                         allTracks[t.Location] = new TrackEntry
                         {
                             Features = feat,
@@ -7382,9 +7385,7 @@ namespace Truedat
                         // What the first pass analyzed is what the second may reuse. Only entries that are current: an older entry
                         // for the same audio would be found first and send the track to be analyzed again.
                         moodShaIndex = BuildHashIndex(allTracks, e => HasCurrentEntry(e) ? e.AudioStreamSha256 : null);
-                        int reusedBefore = Volatile.Read(ref cachedByShaCross);
                         RunPass(secondPass);
-                        sameAudioReused = Volatile.Read(ref cachedByShaCross) - reusedBefore;
                     }
                 }
             }
@@ -22904,10 +22905,16 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 // The list was read when the scan began. Content analyzed since then has had its edges folded in this run, so an
                 // identical track met later in the same scan may reuse it rather than be analyzed again.
                 Assert(!HasCurrentEntry(lacking), "gate: content on the lacking-edges list is stale until this run analyzes it");
-                NoteFreshContent(StaleSha);
+                NoteFreshEdges(StaleSha);
                 Assert(HasCurrentEntry(lacking), "gate: content this run has analyzed is current for the rest of the run, so its duplicate can reuse it");
-                _contentMeasuredThisRun.TryRemove(StaleSha, out _);
+                ForgetFreshEdges(StaleSha);
                 Assert(!HasCurrentEntry(lacking), "gate: and only that content");
+                NoteFreshContent(StaleSha);
+                Assert(!HasCurrentEntry(lacking), "gate: content analyzed this run whose edges were not written is still lacking (review #20)");
+                Assert(IsSameRunReuse(StaleSha), "reuse count: a hit on audio this run analyzed is a same-run reuse");
+                Assert(!IsSameRunReuse("77" + StaleSha.Substring(2)), "reuse count: a hit on an entry the catalog already held is not (review #22)");
+                Assert(!IsSameRunReuse(null), "reuse count: an entry without an audio hash is not");
+                _contentMeasuredThisRun.TryRemove(StaleSha, out _);
                 _edgesStale = savedStale;
                 _refreshFeatures = savedRf;
             }
@@ -26744,6 +26751,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         {
             if (!string.IsNullOrEmpty(audioSha)) _contentMeasuredThisRun[audioSha!] = 0;
         }
+        /// <summary>Content whose edges this run has folded and can write - what lets an identical copy met later in the run
+        /// count as having its edges. Kept apart from <see cref="_contentMeasuredThisRun"/>: a track can be analyzed and its edge
+        /// fold fail, or its spill be lost at the flush, and then the next copy must still get its edges (review #20).</summary>
+        static readonly ConcurrentDictionary<string, byte> _contentEdgesThisRun = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        internal static void NoteFreshEdges(string? audioSha) { if (!string.IsNullOrEmpty(audioSha)) _contentEdgesThisRun[audioSha!] = 0; }
+        /// <summary>The flush could not write this audio's edges (a failed fold, a lost spill): it is not done after all.</summary>
+        internal static void ForgetFreshEdges(string? audioSha) { if (!string.IsNullOrEmpty(audioSha)) _contentEdgesThisRun.TryRemove(audioSha!, out _); }
+        internal static bool EdgesFreshThisRun(string? audioSha) => !string.IsNullOrEmpty(audioSha) && _contentEdgesThisRun.ContainsKey(audioSha!);
+        /// <summary>A cross-path hit counts as "the same audio analyzed once" only when this run made the analysis it reused - a
+        /// renamed copy of a track the catalog already held is an ordinary cache hit (review #22).</summary>
+        internal static bool IsSameRunReuse(string? donorSha) => !string.IsNullOrEmpty(donorSha) && _contentMeasuredThisRun.ContainsKey(donorSha!);
         internal static void NoteFreshAnalysis(string filePath)
         {
             if (!string.IsNullOrEmpty(filePath)) _measuredThisRun[filePath] = 0;

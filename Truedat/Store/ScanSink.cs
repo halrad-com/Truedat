@@ -95,12 +95,18 @@ namespace Truedat.Store
         internal static int PendingArtifacts => _artifacts.Count;
         internal static int PendingEdges => _edges.Count;
 
-        internal static void Reset() { _entries.Clear(); _copyOnly.Clear(); _retire.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _edges.Clear(); while (_failures.TryDequeue(out _)) { } Total = new ScanSinkReport { Ok = true }; }
+        internal static void Reset() { _entries.Clear(); _copyOnly.Clear(); _retire.Clear(); _stashed.Clear(); _artifacts.Clear(); _stashedEdges.Clear(); _foldUsable.Clear(); _edges.Clear(); while (_failures.TryDequeue(out _)) { } Total = new ScanSinkReport { Ok = true }; }
 
         /// <summary>S2 C4: the extractor core hands over the edges result for the path it analysed; Record ties it to the entry.
         /// Written to disk at once (packed); a failure to spill is logged and the fold is dropped — never a failed track.</summary>
         /// <summary>Self-test seam: when set, the next spill write fails with this message (a full disk, an unwritable pending directory).</summary>
         internal static string? FailEdgeStashForTest;
+
+        /// <summary>Whether the fold stashed for an analysed path can be written: it folded (or was correctly unavailable for a
+        /// short track) and its spill reached the disk. Kept per analysed path from the stash until the next flush or reset, so the
+        /// answer outlives Record (review #20).</summary>
+        static readonly ConcurrentDictionary<string, bool> _foldUsable = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        internal static bool HasUsableFold(string analysedPath) => _foldUsable.TryGetValue(analysedPath, out var ok) && ok;
 
         internal static void StashEdges(string analysedPath, global::Truedat.Edges.EdgeFoldResult edges)
         {
@@ -115,6 +121,7 @@ namespace Truedat.Store
                 System.IO.File.WriteAllBytes(path, global::Truedat.Edges.EdgeStore.PackResult(edges));
                 if (_stashedEdges.TryGetValue(analysedPath, out var previous)) TryDelete(previous);
                 _stashedEdges[analysedPath] = path;
+                _foldUsable[analysedPath] = edges.Status != "failed";
             }
             catch (Exception ex)
             {
@@ -123,6 +130,7 @@ namespace Truedat.Store
                 // summary saying 0 folds failed.
                 if (_stashedEdges.TryGetValue(analysedPath, out var previous)) TryDelete(previous);
                 _stashedEdges[analysedPath] = UnspilledPrefix + ex.Message;
+                _foldUsable[analysedPath] = false;
                 StoreLog.Warn($"could not stash the edge fold for {analysedPath}: {ex.Message} (recorded as a failed edges run)");
             }
         }
@@ -183,6 +191,7 @@ namespace Truedat.Store
         internal static void Rekey(string fromPath, string toPath)
         {
             if (_stashedEdges.TryRemove(fromPath, out var edges)) { if (_stashedEdges.TryRemove(toPath, out var prevEdges)) TryDelete(prevEdges); _stashedEdges[toPath] = edges; }
+            if (_foldUsable.TryRemove(fromPath, out var usable)) _foldUsable[toPath] = usable;
             if (!_stashed.TryRemove(fromPath, out var pending)) return;
             if (_stashed.TryRemove(toPath, out var previous)) TryDelete(previous);
             _stashed[toPath] = pending;
@@ -193,6 +202,7 @@ namespace Truedat.Store
         internal static void Discard(string analysedPath)
         {
             if (_stashedEdges.TryRemove(analysedPath, out var edges)) TryDelete(edges);
+            _foldUsable.TryRemove(analysedPath, out _);
             if (_stashed.TryRemove(analysedPath, out var pending)) TryDelete(pending);
         }
 
