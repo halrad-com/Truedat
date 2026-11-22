@@ -3223,7 +3223,10 @@ namespace Truedat
                 // The first working-file path a writing verb asks for settles that library's folder and moves what is beside the
                 // catalog — keyed on the folder the verb actually touches, never on a guess. The library scan settles its own
                 // explicitly (BeginWork at its entry) and says so in its tool-check block; every other verb says it here, on stderr.
-                WorkFolder.BeginOnFirstUse = dir => { BeginWork(Path.Combine(dir, MoodsFileName)); ShowWork(Console.Error); };
+                // The catalog is the one this run SELECTED (review #2): rebuilding the default name made a --moods mbxmoods-alt.json look
+                // like one of truedat's mbxmoods-* reports, and --list-formats moved the catalog it had just read. Read at call time, so a
+                // --moods value resolved below (--moods library) counts.
+                WorkFolder.BeginOnFirstUse = dir => { BeginWork(SelectedCatalogIn(dir, analyzeFileMoods)); ShowWork(Console.Error); };
             if (noEdges) { _stageOpts.Edges = false; _edgesFromConfig = false; }
             global::Truedat.Edges.EdgeStore.CaptureArraysDefault = edgeArrays && !noEdgeArrays;   // the persistence gate only — the fold is unchanged (DBA review F6)
             if (workBudgetText != null && ParseBudget(workBudgetText) == null) { Console.Error.WriteLine($"Error: --budget takes a duration like 90s, 30m, 2h or 1h30m (got '{workBudgetText}')."); Environment.ExitCode = 1; return; }
@@ -13948,6 +13951,25 @@ namespace Truedat
                 }
                 _workNames.Clear();
             }
+        }
+
+        /// <summary>The catalog a writing verb works on in <paramref name="catalogDir"/>: the file <c>--moods</c> named when it is in that
+        /// folder (a custom name, mbxmoods-alt.json), else the default name. The work folder's move protects the catalog, its sidecar
+        /// and its numbered parts by THIS name, so it has to be the real one (review #2).</summary>
+        internal static string SelectedCatalogIn(string catalogDir, string? named)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(named) && !Directory.Exists(named) && !named!.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+                {
+                    var full = Path.GetFullPath(named);
+                    var dir = Path.GetDirectoryName(full);
+                    if (dir != null && string.Equals(dir.TrimEnd(Path.DirectorySeparatorChar), Path.GetFullPath(catalogDir).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+                        return full;
+                }
+            }
+            catch { }
+            return Path.Combine(catalogDir, MoodsFileName);
         }
 
         /// <summary>The verbs that only read: they settle no work folder, create none and move nothing, and find each working

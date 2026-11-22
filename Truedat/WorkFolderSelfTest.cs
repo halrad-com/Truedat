@@ -49,6 +49,7 @@ namespace Truedat
                 Size(assert, Path.Combine(root, "size"));
                 Names(assert, Path.Combine(root, "names"));
                 DriveRoots(assert, Path.Combine(root, "roots"));
+                CustomCatalog(assert, Path.Combine(root, "custom"));
                 Settings(assert);
             }
             catch (Exception ex) { assert(false, $"work folder: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -547,6 +548,66 @@ namespace Truedat
                 assert(Where(Path.Combine(asOption, "x")) == Path.Combine(driveRoot, "x"), $"work roots: --work-dir naming a drive root is that root ({asOption})");
             }
             finally { Environment.CurrentDirectory = saved; WorkFolder.Configure(null, AppDomain.CurrentDomain.BaseDirectory); }
+        }
+
+        /// <summary>A verb run on a catalog <c>--moods</c> named (review #2): the first working-file path settles the work folder, and the
+        /// move must know the catalog by its REAL name. It rebuilt the default name, so <c>mbxmoods-alt.json</c> looked like one of
+        /// truedat's <c>mbxmoods-*</c> reports and <c>--list-formats</c> moved the catalog it had just read into the work folder. In a
+        /// child process, because the hook is set only by a real run's argument block.</summary>
+        static void CustomCatalog(Action<bool, string> assert, string root)
+        {
+            var exe = typeof(Program).Assembly.Location;
+            {
+                var lib = Path.Combine(root, "single", "Library");
+                var work = Path.Combine(root, "single", "elsewhere");
+                Directory.CreateDirectory(lib);
+                var catalog = Path.Combine(lib, "mbxmoods-alt.json");
+                File.WriteAllText(catalog, "{\"version\":1,\"trackCount\":0,\"tracks\":{}}");
+                var sidecar = Path.ChangeExtension(catalog, ".mbxs");
+                File.WriteAllText(sidecar, "sidecar");
+                var stays = new[] { catalog, sidecar };
+                var errors = Path.Combine(lib, "mbxmoods-errors.csv");
+                File.WriteAllText(errors, "Error,Artist,Title,FilePath,SizeMB,Duration,FailedComponents\r\n");
+
+                var start = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = exe, WorkingDirectory = lib,
+                    Arguments = "--no-config --moods \"" + catalog + "\" --list-formats --work-dir \"" + work + "\"",
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
+                };
+                int exit;
+                using (var child = System.Diagnostics.Process.Start(start)!)
+                {
+                    child.StandardInput.Close();
+                    var so = child.StandardOutput.ReadToEndAsync(); var se = child.StandardError.ReadToEndAsync();
+                    if (!child.WaitForExit(120000)) { try { child.Kill(); } catch { } }
+                    exit = child.HasExited ? child.ExitCode : -1;
+                    so.GetAwaiter().GetResult(); se.GetAwaiter().GetResult();
+                }
+                var gone = stays.Where(p => !File.Exists(p)).Select(Path.GetFileName).ToList();
+                assert(gone.Count == 0, $"work custom catalog: --list-formats leaves the catalog and its sidecar beside the library (exit {exit}{(gone.Count > 0 ? "; moved: " + string.Join(", ", gone) : "")})");
+                assert(exit == 0 && File.Exists(Path.Combine(work, "mbxmoods-formats.csv")), $"work custom catalog: and writes its report in the work folder (exit {exit})");
+                assert(!File.Exists(errors) && File.Exists(Path.Combine(work, "mbxmoods-errors.csv")), "work custom catalog: the working files still move");
+            }
+
+            // A split custom catalog (parts only: no verb that settles a folder reads one, so no child run reaches this): the move,
+            // given the catalog's real name, leaves every part and the sidecar where they are.
+            {
+                var lib = Path.Combine(root, "split", "Library");
+                var work = Path.Combine(root, "split", "elsewhere");
+                Directory.CreateDirectory(lib);
+                var catalog = Path.Combine(lib, "mbxmoods-alt.json");
+                var stays = new List<string>();
+                foreach (var n in new[] { 1, 2, 3 }) { var p = catalog + "." + n; File.WriteAllText(p, "{\"tracks\":{}}"); stays.Add(p); }
+                var sidecar = Path.ChangeExtension(catalog, ".mbxs"); File.WriteAllText(sidecar, "sidecar"); stays.Add(sidecar);
+                File.WriteAllText(Path.Combine(lib, "mbxmoods-errors.csv"), "e");
+                WorkFolder.Configure(work, Path.Combine(root, "Tools"));
+                WorkFolder.Begin(lib, out _);
+                var r = WorkFolder.MoveExisting(catalog, null);
+                var gone = stays.Where(p => !File.Exists(p)).Select(Path.GetFileName).ToList();
+                assert(gone.Count == 0 && r.Moved == 1, $"work custom catalog (split): the move keeps every numbered part and the sidecar by the catalog's real name ({r.Moved} moved{(gone.Count > 0 ? "; lost: " + string.Join(", ", gone) : "")})");
+                WorkFolder.Configure(null, AppDomain.CurrentDomain.BaseDirectory);
+            }
         }
 
         /// <summary>The flag and the config key are one spelling, and a reset may ride with it.</summary>
