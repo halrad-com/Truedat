@@ -1,41 +1,58 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 
 namespace Truedat
 {
     /// <summary>
-    /// <c>--reset</c>: put every file truedat wrote for a library into one zip, remove them, and let
-    /// the scan that follows start from nothing.
+    /// <c>--clear</c> and <c>--reset</c>: put every file truedat wrote for a library into one zip, remove them, and let the
+    /// scan that follows start from nothing. One implementation; the two verbs differ only in what they keep
+    /// (<see cref="Keeps"/>, the one answer, tested as a table).
     ///
-    /// A scan trusts what a catalog already holds — an entry with every field present is a cache
-    /// hit, whatever build measured it. That is right for a normal scan and it means a field whose
-    /// definition later changed stays as it was. This is the verb for "measure all of it again":
-    /// not a flag on the cache, a clean start, with the old state kept in one file.
+    /// A scan trusts what a catalog already holds — an entry with every field present is a cache hit, whatever build
+    /// measured it. That is right for a normal scan and it means a field whose definition later changed stays as it was.
+    /// These are the verbs for "measure all of it again": not a flag on the cache, a clean start, with the old state kept
+    /// in one file.
     ///
-    /// What makes it safe to offer: nothing is removed until the archive has been written and read
-    /// back; a file another program holds stops the run before the archive is written; and the scan
-    /// entry refuses to begin unless it can also finish (extractor present, library on this machine).
-    /// The exclusion rules and the config file are the operator's decisions, not scan output, and stay.
+    /// <c>--clear</c> (operator 2026-11-21: "clear keeps what you have but clears the truedat db") keeps the operator's own
+    /// files — the exclusion rules, <c>apply-result.json</c>, the duplicate verdicts — and carries the review list's ignore
+    /// decisions into a fresh list ("give me a clean slate but i dont want to resetup how its working now"). <c>--reset</c>
+    /// ("reset is a full reset") takes all of that too. Both keep the config file, the field registry, snapshots and every
+    /// earlier clear or reset archive.
+    ///
+    /// What makes them safe to offer: nothing is removed until the archive has been written and read back; a file another
+    /// program holds stops the run before the archive is written; and the scan entry refuses to begin unless it can also
+    /// finish (extractor present, library on this machine). <c>--restore</c> of either archive brings the catalog back,
+    /// and of a reset archive the operator's files too.
     /// </summary>
     internal static class ResetCommand
     {
+        internal enum Verb { Clear, Reset }
+
         internal const string Flag = "reset";
-        /// <summary>The confirmation for a run nobody is sitting at. Not a config key, on purpose.</summary>
+        internal const string ClearFlag = "clear";
+        /// <summary>The confirmation for a run nobody is sitting at, for either verb. Not a config key, on purpose.</summary>
         internal const string ConfirmFlag = "imeanit";
         /// <summary>What a person types at the prompt. Upper case and exact: a reflex "y" or "reset" is not it.</summary>
         internal const string ConfirmWord = "RESET";
+        internal const string ClearConfirmWord = "CLEAR";
         internal const string ArchivePrefix = "mbxmoods-reset-";
+        internal const string ClearArchivePrefix = "mbxmoods-clear-";
 
-        /// <summary>The flags that may ride with <c>--reset</c>: options of the library scan. Anything else on the line is
-        /// another verb or another verb's option, and the run is refused naming it — a reset that quietly did not happen,
-        /// or happened beside something else, is worse than a refusal. Allow-list, so a flag added later is refused until
-        /// someone decides it belongs here. Every config key must be on it (pinned by the self-test): a config key becomes
-        /// an argument on every run.</summary>
+        internal static string FlagOf(Verb v) => v == Verb.Clear ? ClearFlag : Flag;
+        internal static string WordOf(Verb v) => v == Verb.Clear ? ClearConfirmWord : ConfirmWord;
+        internal static string PrefixOf(Verb v) => v == Verb.Clear ? ClearArchivePrefix : ArchivePrefix;
+
+        /// <summary>The flags that may ride with <c>--clear</c> or <c>--reset</c>: options of the library scan. Anything else
+        /// on the line is another verb or another verb's option — the other of the two included — and the run is refused
+        /// naming it: a reset that quietly did not happen, or happened beside something else, is worse than a refusal.
+        /// Allow-list, so a flag added later is refused until someone decides it belongs here. Every config key must be on
+        /// it (pinned by the self-test): a config key becomes an argument on every run.</summary>
         internal static readonly string[] ScanOptions =
         {
-            Flag, ConfirmFlag,
+            ConfirmFlag,
             "analyze", "p", "parallel", "audit", "audit-verdicts", "pause", "allow-sleep", "background", "cpu-limit", "budget",
             "no-config", "no-stage", "stage-dir", "no-quick-cache", "no-dir-batch",
             "file-md5", "no-bitusage", "no-hf-analysis", "smfm", "no-smfm",
@@ -47,13 +64,13 @@ namespace Truedat
             "publish", "no-publish", "split-mb", "keep-backups", "scan-summary", "fixup-after-scan",
         };
 
-        /// <summary>The first token on the command line that is a flag <c>--reset</c> cannot be combined with, as typed;
-        /// null when there is none. Read the way the parser reads it: any token whose canonical form is a known flag is
-        /// that flag (a bare word included), and the token after a value-taking flag is its value.</summary>
-        internal static string? ConflictingFlag(string[] args)
+        /// <summary>The first token on the command line that is a flag <paramref name="verb"/> cannot be combined with, as
+        /// typed; null when there is none. Read the way the parser reads it: any token whose canonical form is a known flag
+        /// is that flag (a bare word included), and the token after a value-taking flag is its value.</summary>
+        internal static string? ConflictingFlag(string[] args, Verb verb)
         {
             var known = new HashSet<string>(Program.KnownFlags, StringComparer.OrdinalIgnoreCase);
-            var allowed = new HashSet<string>(ScanOptions, StringComparer.OrdinalIgnoreCase);
+            var allowed = new HashSet<string>(ScanOptions, StringComparer.OrdinalIgnoreCase) { FlagOf(verb) };
             for (int i = 0; i < args.Length; i++)
             {
                 var canonical = Program.CanonicalFlag(args[i]);
@@ -64,32 +81,53 @@ namespace Truedat
             return null;
         }
 
-        /// <summary>Files that match truedat's naming but are not this reset's to take: the operator's exclusion rules and
-        /// their backups, the field registry, a snapshot somebody took on purpose, and an earlier reset's archive (a reset
-        /// never swallows the previous one).</summary>
-        internal static bool IsKept(string name)
+        /// <summary>The operator's own files: decisions, not scan output — the exclusion rules with their backups and the
+        /// exclusion playlist (everything named <c>mbxmoods-exclude*</c> but the lock), the result of applying them, and the
+        /// duplicate verdicts. <c>--clear</c> keeps them; <c>--reset</c> archives and removes them.</summary>
+        internal static bool IsOperatorFile(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            if (IsRulesLock(name)) return false;
+            return name.StartsWith(Path.GetFileNameWithoutExtension(ExclusionStore.FileName), StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, ExclusionStore.ApplyResultFileName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, WorkFolder.DedupeVerdictsFileName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>The exclusion file's lock: a zero-byte file the writers coordinate on and never delete. A mechanism, not a
+        /// decision — kept by both verbs.</summary>
+        static bool IsRulesLock(string name)
+            => string.Equals(name, ExclusionStore.FileName + ExclusionStore.LockFileSuffix, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// THE keep-list: does <paramref name="verb"/> leave this file where it is? Both keep a snapshot somebody took on
+        /// purpose, every earlier clear or reset archive (neither verb swallows a previous one), the config file and the
+        /// field registry (they belong to the exe, which may serve several libraries, and say how the scan after runs), and
+        /// the exclusion file's lock. <c>--clear</c> also keeps the operator's own files (<see cref="IsOperatorFile"/>).
+        /// Everything else truedat wrote for the library is archived, then removed.
+        /// </summary>
+        internal static bool Keeps(Verb verb, string name)
         {
             if (string.IsNullOrEmpty(name)) return false;
             bool Starts(string prefix) => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
-            return Starts(Path.GetFileNameWithoutExtension(ExclusionStore.FileName))   // mbxmoods-exclude.json and its children
-                || Starts("mbxmoods-snapshot-")
-                || Starts(ArchivePrefix)
-                || string.Equals(name, "mbxmoods-schema.json", StringComparison.OrdinalIgnoreCase);
+            bool Is(string other) => string.Equals(name, other, StringComparison.OrdinalIgnoreCase);
+            if (Starts("mbxmoods-snapshot-") || Starts(ArchivePrefix) || Starts(ClearArchivePrefix)) return true;
+            if (Is("mbxmoods-schema.json") || Is(TruedatConfig.FileName) || IsRulesLock(name)) return true;
+            return verb == Verb.Clear && IsOperatorFile(name);
         }
 
         internal enum Confirmation { Confirmed, Declined, NotAsked }
 
         /// <summary>Has the operator said yes. The flag is a yes. With no flag and nobody at the console there is no one to
         /// ask, so nothing is read and nothing is written (<see cref="Confirmation.NotAsked"/>, the caller refuses). At a
-        /// console the answer must be the word itself.</summary>
-        internal static Confirmation Confirm(bool flagGiven, bool inputRedirected, Func<string?> readLine, TextWriter prompt)
+        /// console the answer must be the verb's own word.</summary>
+        internal static Confirmation Confirm(Verb verb, bool flagGiven, bool inputRedirected, Func<string?> readLine, TextWriter prompt)
         {
             if (flagGiven) return Confirmation.Confirmed;
             if (inputRedirected) return Confirmation.NotAsked;
-            prompt.Write($"  Type {ConfirmWord} to continue (anything else leaves everything as it is): ");
+            prompt.Write($"  Type {WordOf(verb)} to continue (anything else leaves everything as it is): ");
             prompt.Flush();
             var answer = readLine();
-            return string.Equals(answer?.Trim(), ConfirmWord, StringComparison.Ordinal) ? Confirmation.Confirmed : Confirmation.Declined;
+            return string.Equals(answer?.Trim(), WordOf(verb), StringComparison.Ordinal) ? Confirmation.Confirmed : Confirmation.Declined;
         }
 
         /// <summary>The reset is only worth doing where the library can be analyzed again. A catalog copied to a machine
@@ -108,12 +146,14 @@ namespace Truedat
             return picked;
         }
 
-        /// <summary>The file set: everything truedat wrote for this library, as (path, name inside the archive).
+        /// <summary>The file set: everything <paramref name="verb"/> takes for this library, as (path, name inside the archive).
         /// Beside the catalog it is whatever the scan summary's own size block counts (<see cref="Program.ClassifySideFile"/>,
-        /// one definition of "ours"), less <see cref="IsKept"/>. A store kept in another folder brings that folder's store
-        /// files under <c>store/</c>; the review ledger, when it lives in the hub's review folder, comes as
-        /// <c>review/</c> — and only the ledger, because the other manifests there belong to other verbs.</summary>
-        internal static List<(string Path, string EntryName)> Collect(string catalogPath, string? storePath, string? reviewLedgerPath)
+        /// one definition of "ours") and, for <c>--reset</c>, the operator's own files (<c>apply-result.json</c> is not
+        /// truedat's to the classifier) — less <see cref="Keeps"/>. The work folder's working files come under <c>work/</c>;
+        /// a store kept in another folder brings that folder's store files under <c>store/</c>; the review ledger, when it
+        /// lives in the hub's review folder, comes as <c>review/</c> — and only the ledger, because the other manifests there
+        /// belong to other verbs.</summary>
+        internal static List<(string Path, string EntryName)> Collect(Verb verb, string catalogPath, string? storePath, string? reviewLedgerPath)
         {
             var files = new List<(string Path, string EntryName)>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -132,8 +172,10 @@ namespace Truedat
                 foreach (var f in Directory.GetFiles(dir).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
                 {
                     var name = Path.GetFileName(f);
-                    if (IsKept(name)) continue;
-                    if (Program.ClassifySideFile(name, catalogName, sidecarName, companion, storeNameHere) != Program.SideFile.None) Add(f, name);
+                    if (Keeps(verb, name)) continue;
+                    if (Program.ClassifySideFile(name, catalogName, sidecarName, companion, storeNameHere) != Program.SideFile.None
+                        || IsOperatorFile(name))
+                        Add(f, name);
                 }
 
             // The work folder (WorkFolder): the working files truedat wrote for this library — the same classifier, narrowed to
@@ -145,7 +187,7 @@ namespace Truedat
                 foreach (var f in Directory.GetFiles(workDir).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
                 {
                     var name = Path.GetFileName(f);
-                    if (IsKept(name)) continue;
+                    if (Keeps(verb, name)) continue;
                     if (WorkFolder.IsWorkingFile(name, catalogName, sidecarName, companion, storeNameHere)) Add(f, "work/" + name);
                 }
 
@@ -220,7 +262,7 @@ namespace Truedat
         {
             public int Archived;
             public long Bytes;
-            /// <summary>Files that were archived but could not then be removed. Empty on a clean reset.</summary>
+            /// <summary>Files that were archived but could not then be removed. Empty on a clean run.</summary>
             public List<string> NotRemoved = new List<string>();
         }
 
@@ -232,12 +274,14 @@ namespace Truedat
         internal static Result Execute(IReadOnlyList<(string Path, string EntryName)> files, string archivePath, string? storeName = null)
         {
             var result = new Result();
-            // An archive that was being written when an earlier reset was stopped: unfinished, never moved into place, and
-            // named for that run's time, so nothing would ever write over it or remove it.
+            // An archive that was being written when an earlier clear or reset was stopped: unfinished, never moved into
+            // place, and named for that run's time, so nothing would ever write over it or remove it.
             try
             {
-                foreach (var stale in Directory.GetFiles(Path.GetDirectoryName(Path.GetFullPath(archivePath)) ?? ".", ArchivePrefix + "*.zip.tmp"))
-                    try { File.Delete(stale); } catch { }
+                var archiveDir = Path.GetDirectoryName(Path.GetFullPath(archivePath)) ?? ".";
+                foreach (var prefix in new[] { ArchivePrefix, ClearArchivePrefix })
+                    foreach (var stale in Directory.GetFiles(archiveDir, prefix + "*.zip.tmp"))
+                        try { File.Delete(stale); } catch { }
             }
             catch { }
             foreach (var f in files) result.Bytes += new FileInfo(f.Path).Length;
@@ -254,9 +298,66 @@ namespace Truedat
             return result;
         }
 
-        /// <summary>The archive is a working file: the library's work folder (<see cref="WorkFolder"/>).</summary>
-        internal static string ArchivePathFor(string catalogPath, DateTime nowLocal)
+        /// <summary>The archive is a working file: the library's work folder (<see cref="WorkFolder"/>), named for its verb.</summary>
+        internal static string ArchivePathFor(Verb verb, string catalogPath, DateTime nowLocal)
             => WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".",
-                                ArchivePrefix + nowLocal.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + ".zip");
+                                PrefixOf(verb) + nowLocal.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + ".zip");
+
+        // ---- the review list across --clear ------------------------------------------------------------------------------
+
+        /// <summary>The ledger <c>--clear</c> writes back after the archive, or null when there is nothing to write: only the
+        /// records the operator marked ignore, unchanged. <c>--reset</c> carries nothing.</summary>
+        internal static ReviewLedger? CarriedLedger(Verb verb, ReviewLedger before)
+        {
+            if (verb != Verb.Clear) return null;
+            var carried = before.IgnoreOnly();
+            return carried.Count > 0 ? carried : null;
+        }
+
+        // ---- the operator's files across --restore ----------------------------------------------------------------------
+
+        /// <summary>The operator's files a reset archive holds: entries at its top level that <see cref="IsOperatorFile"/>
+        /// names. A snapshot (it carries a manifest) also bundles the exclusion file, and restoring a snapshot has always
+        /// left it in the archive — so a snapshot names none. A clear archive holds none by construction.</summary>
+        internal static List<string> RuleEntries(string archivePath)
+        {
+            var names = new List<string>();
+            try
+            {
+                using var zip = ZipFile.OpenRead(archivePath);
+                if (zip.GetEntry(CatalogArchive.ManifestEntryName) != null) return names;
+                foreach (var e in zip.Entries)
+                    if (e.FullName.IndexOf('/') < 0 && IsOperatorFile(e.FullName)) names.Add(e.FullName);
+            }
+            catch (Exception) { /* not a zip, or unreadable: the restore's own read reports it */ }
+            return names;
+        }
+
+        /// <summary>The rule files a restore would put back that exist now, as full paths. A restore never writes over a
+        /// decision the operator has made since the archive; it names the file and stops.</summary>
+        internal static List<string> RuleConflicts(IEnumerable<string> entries, string catalogDir)
+            => entries.Select(e => Path.Combine(catalogDir, e)).Where(File.Exists).ToList();
+
+        /// <summary>Put the operator's files back beside the catalog, byte for byte, each written to a temp name and moved into
+        /// place without writing over anything. Returns how many were put back; throws on the first that cannot be.</summary>
+        internal static int RestoreRules(string archivePath, IEnumerable<string> entries, string catalogDir)
+        {
+            int put = 0;
+            using var zip = ZipFile.OpenRead(archivePath);
+            foreach (var name in entries)
+            {
+                var e = zip.GetEntry(name) ?? throw new IOException($"{name} is not in {archivePath}");
+                var dest = Path.Combine(catalogDir, name);
+                var tmp = dest + ".restore.tmp";
+                try { File.Delete(tmp); } catch { }
+                using (var src = e.Open())
+                using (var dst = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    src.CopyTo(dst);
+                try { File.SetLastWriteTime(tmp, e.LastWriteTime.LocalDateTime); } catch { }
+                File.Move(tmp, dest);   // not Replace: a file that appeared meanwhile fails here instead of being written over
+                put++;
+            }
+            return put;
+        }
     }
 }

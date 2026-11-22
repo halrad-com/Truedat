@@ -114,6 +114,9 @@ namespace Truedat
                     foreach (var f in files)
                     {
                         var entry = zip.CreateEntry(f.EntryName, CompressionLevel.Optimal);
+                        // The file's own time, not the time of the backup: a restore that puts a file back (a reset's rule
+                        // files) puts its time back too. Outside the zip format's range the default stands.
+                        try { entry.LastWriteTime = File.GetLastWriteTime(f.Path); } catch (ArgumentOutOfRangeException) { }
                         using var es = entry.Open();
                         using var src = new FileStream(f.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
                         using var sha = SHA256.Create();

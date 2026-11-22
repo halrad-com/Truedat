@@ -363,13 +363,13 @@ namespace Truedat
             File.WriteAllText(Path.Combine(lib, "mbxmoods-skipped.csv"), "held over from before the move");
             WorkFolder.Configure(null, exe);
             WorkFolder.Begin(lib, out _);
-            var files = ResetCommand.Collect(catalog, null, null);
+            var files = ResetCommand.Collect(ResetCommand.Verb.Clear, catalog, null, null);
             var entries = files.Select(f => f.EntryName).OrderBy(n => n, StringComparer.Ordinal).ToArray();
             string[] want = { "mbxmoods-duplicates.json", "mbxmoods-skipped.csv", "mbxmoods.json", "mbxmoods.mbxs", "store-result.json",
                               "work/mbxmoods-errors.csv", "work/mbxmoods.json.bak.20260101.000000.zip", "work/truedat.log" };
             assert(entries.SequenceEqual(want), $"work reset: the file set spans both folders, the work folder's under work/ ({string.Join(", ", entries)})");
             assert(files.All(f => File.Exists(f.Path)), "work reset: every entry names a real file");
-            var archive = ResetCommand.ArchivePathFor(catalog, new DateTime(2026, 11, 21, 1, 2, 3));
+            var archive = ResetCommand.ArchivePathFor(ResetCommand.Verb.Reset, catalog, new DateTime(2026, 11, 21, 1, 2, 3));
             assert(Path.GetDirectoryName(archive) == exe, $"work reset: the archive is written to the work folder ({archive})");
         }
 
@@ -513,7 +513,7 @@ namespace Truedat
             var s = TruedatConfig.Find(WorkFolder.Flag);
             assert(s != null && s.Kind == TruedatConfig.Kind.Text, "work settings: work-dir is a config key that takes a path");
             assert(Program.KnownFlags.Contains(WorkFolder.Flag) && Program.TakesValue(WorkFolder.Flag), "work settings: --work-dir is a flag that takes a value");
-            assert(ResetCommand.ScanOptions.Contains(WorkFolder.Flag), "work settings: --reset accepts --work-dir (every config key rides with a reset)");
+            assert(ResetCommand.ScanOptions.Contains(WorkFolder.Flag), "work settings: --clear and --reset accept --work-dir (every config key rides with them)");
         }
     }
 }

@@ -299,6 +299,16 @@ namespace Truedat
         /// forever. Returns false when the path had no record.</summary>
         internal bool Remove(string path) => _byPath.Remove(path ?? "");
 
+        /// <summary>A new ledger holding only the records the operator marked ignore, each the same record — what
+        /// <c>--clear</c> carries across ("i dont want to resetup how its working now"). This ledger is not changed.</summary>
+        internal ReviewLedger IgnoreOnly()
+        {
+            var kept = new ReviewLedger();
+            foreach (var r in _byPath.Values)
+                if (r.State == ReviewState.Ignore) kept._byPath[r.Path] = r;
+            return kept;
+        }
+
         /// <summary>
         /// Retire every record whose path the library no longer lists. Returns how many.
         ///

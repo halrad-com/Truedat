@@ -4,99 +4,142 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Text.Json.Nodes;
 
 namespace Truedat
 {
     /// <summary>
-    /// <c>--reset</c>: archive this library's truedat files into one zip, remove them, scan from nothing.
+    /// <c>--clear</c> and <c>--reset</c>: archive this library's truedat files into one zip, remove them, scan from nothing.
+    /// The two verbs are one implementation that differs only in what it keeps (<see cref="ResetCommand.Keeps"/>):
+    /// <c>--clear</c> keeps the operator's own files (the exclusion rules, apply-result.json, the duplicate verdicts) and
+    /// carries the review list's ignore decisions into a fresh list; <c>--reset</c> takes all of it.
     ///
-    /// The rules are pinned as functions here (which files, which are kept, what counts as a
-    /// confirmation, archive-before-remove). The last block runs the real verb in a child process,
-    /// because none of the functions can pin where the scan calls them.
+    /// The rules are pinned as functions here (which files, which are kept, what counts as a confirmation,
+    /// archive-before-remove, what a restore puts back). The last block runs the real verbs in child processes, because
+    /// none of the functions can pin where the scan calls them.
     /// </summary>
     internal static class ResetSelfTest
     {
         internal static void Run(Action<bool, string> assert)
         {
-            Console.WriteLine("Reset: archive the library's truedat files, remove them, scan from nothing");
+            Console.WriteLine("Clear and reset: archive the library's truedat files, remove them, scan from nothing");
             TestFlags(assert);
-            TestKept(assert);
+            TestKeepTable(assert);
             TestConfirm(assert);
             TestAbsentLibrary(assert);
             TestStoreAfterReset(assert);
             TestStoreIsWholeBeforeArchiving(assert);
             TestCollectAndExecute(assert);
+            TestIgnoreCarried(assert);
+            TestRuleRestore(assert);
             TestCli(assert);
         }
 
         static void TestFlags(Action<bool, string> assert)
         {
-            string? C(params string[] args) => ResetCommand.ConflictingFlag(args);
-            assert(C("--reset", "--imeanit", "-p", "8", "--store", "--edges", "--audit") == null,
+            var R = ResetCommand.Verb.Reset; var Cl = ResetCommand.Verb.Clear;
+            string? C(ResetCommand.Verb v, params string[] args) => ResetCommand.ConflictingFlag(args, v);
+            assert(C(R, "--reset", "--imeanit", "-p", "8", "--store", "--edges", "--audit") == null,
                 "reset-flags: scan options ride with --reset");
-            assert(C("--reset", "--fixup") == "--fixup", $"reset-flags: another verb is named ({C("--reset", "--fixup")})");
-            assert(C("--reset", "--analyze-file", "a.flac") == "--analyze-file",
-                $"reset-flags: a per-file mode is named ({C("--reset", "--analyze-file", "a.flac")})");
-            assert(C("--reset", "--chunk", "1/2") == "--chunk", "reset-flags: --chunk is named");
-            assert(C("--reset", "--moods", "x.json") == "--moods", "reset-flags: --moods is named (the library scan's catalog is beside the library)");
-            assert(C("--reset", "--stage-dir", "stats") == null, "reset-flags: a value that spells a flag name is a value, not a flag");
-            assert(C("reset", "stats") == "stats", "reset-flags: a bare-word verb is caught as the parser would read it");
-            assert(C("--reset", Path.Combine("C:", "lib", "iTunes Music Library.xml")) == null,
+            assert(C(Cl, "--clear", "--imeanit", "-p", "8", "--store", "--edges", "--audit") == null,
+                "clear-flags: scan options ride with --clear");
+            assert(C(R, "--reset", "--fixup") == "--fixup", $"reset-flags: another verb is named ({C(R, "--reset", "--fixup")})");
+            assert(C(Cl, "--clear", "--fixup") == "--fixup", $"clear-flags: another verb is named ({C(Cl, "--clear", "--fixup")})");
+            assert(C(R, "--reset", "--clear") == "--clear", $"reset-flags: --clear beside --reset is refused, naming it ({C(R, "--reset", "--clear")})");
+            assert(C(Cl, "--clear", "--reset") == "--reset", $"clear-flags: --reset beside --clear is refused, naming it ({C(Cl, "--clear", "--reset")})");
+            assert(C(R, "--reset", "--analyze-file", "a.flac") == "--analyze-file",
+                $"reset-flags: a per-file mode is named ({C(R, "--reset", "--analyze-file", "a.flac")})");
+            assert(C(R, "--reset", "--chunk", "1/2") == "--chunk", "reset-flags: --chunk is named");
+            assert(C(R, "--reset", "--moods", "x.json") == "--moods", "reset-flags: --moods is named (the library scan's catalog is beside the library)");
+            assert(C(R, "--reset", "--stage-dir", "stats") == null, "reset-flags: a value that spells a flag name is a value, not a flag");
+            assert(C(R, "reset", "stats") == "stats", "reset-flags: a bare-word verb is caught as the parser would read it");
+            assert(C(R, "--reset", Path.Combine("C:", "lib", "iTunes Music Library.xml")) == null,
                 "reset-flags: the positional library path is not a flag");
-            assert(C("/reset", "/imeanit", "/no-store") == null, "reset-flags: slash spellings are read the same way");
-            assert(C("--reset", "--analyze") == null, $"reset-flags: --analyze names the library scan itself ({C("--reset", "--analyze")})");
-            assert(C("--reset", "--audit-verdicts") == null, $"reset-flags: --audit-verdicts is --audit with more detail ({C("--reset", "--audit-verdicts")})");
+            assert(C(R, "/reset", "/imeanit", "/no-store") == null, "reset-flags: slash spellings are read the same way");
+            assert(C(R, "--reset", "--analyze") == null, $"reset-flags: --analyze names the library scan itself ({C(R, "--reset", "--analyze")})");
+            assert(C(R, "--reset", "--audit-verdicts") == null, $"reset-flags: --audit-verdicts is --audit with more detail ({C(R, "--reset", "--audit-verdicts")})");
 
             var known = new HashSet<string>(Program.KnownFlags, StringComparer.OrdinalIgnoreCase);
             var unknown = ResetCommand.ScanOptions.Where(f => !known.Contains(f)).ToList();
             assert(unknown.Count == 0, "reset-flags: every allowed option is a real flag" + (unknown.Count > 0 ? " (not: " + string.Join(", ", unknown) + ")" : ""));
-            assert(known.Contains(ResetCommand.Flag) && known.Contains(ResetCommand.ConfirmFlag), "reset-flags: --reset and --imeanit are known flags");
+            assert(known.Contains(ResetCommand.Flag) && known.Contains(ResetCommand.ClearFlag) && known.Contains(ResetCommand.ConfirmFlag),
+                "reset-flags: --reset, --clear and --imeanit are known flags");
 
-            // A config key becomes an argument on every run. One that --reset refused would make the
-            // verb unusable on that instance, with a message blaming a flag nobody typed.
+            // A config key becomes an argument on every run. One that either verb refused would make it unusable on that
+            // instance, with a message blaming a flag nobody typed.
             var allowed = new HashSet<string>(ResetCommand.ScanOptions, StringComparer.OrdinalIgnoreCase);
             var blocked = TruedatConfig.Settings.Select(s => s.Key).Where(k => !allowed.Contains(k)).ToList();
-            assert(blocked.Count == 0, "reset-flags: every config key may ride with --reset" + (blocked.Count > 0 ? " (refused: " + string.Join(", ", blocked) + ")" : ""));
-            assert(!TruedatConfig.Settings.Any(s => string.Equals(s.Key, ResetCommand.Flag, StringComparison.OrdinalIgnoreCase)
-                                          || string.Equals(s.Key, ResetCommand.ConfirmFlag, StringComparison.OrdinalIgnoreCase)),
-                "reset-flags: neither --reset nor its confirmation can be set in the config file");
+            assert(blocked.Count == 0, "reset-flags: every config key may ride with --clear and --reset" + (blocked.Count > 0 ? " (refused: " + string.Join(", ", blocked) + ")" : ""));
+            bool IsKey(string flag) => TruedatConfig.Settings.Any(s => string.Equals(s.Key, flag, StringComparison.OrdinalIgnoreCase));
+            assert(!IsKey(ResetCommand.Flag) && !IsKey(ResetCommand.ClearFlag) && !IsKey(ResetCommand.ConfirmFlag),
+                "reset-flags: neither --clear, --reset nor their confirmation can be set in the config file");
         }
 
-        static void TestKept(Action<bool, string> assert)
+        /// <summary>The one function that answers "what does this verb keep", as a table: every row of the task's table, for both verbs.</summary>
+        static void TestKeepTable(Action<bool, string> assert)
         {
-            assert(ResetCommand.IsKept(ExclusionStore.FileName), "reset-kept: the exclusion rules are the operator's, not scan output");
-            assert(ResetCommand.IsKept(ExclusionStore.FileName + ".bak.20260101-000000.zip"), "reset-kept: so are the exclusion file's own backups");
-            assert(ResetCommand.IsKept("mbxmoods-snapshot-20260101-000000.zip"), "reset-kept: a snapshot the operator took");
-            assert(ResetCommand.IsKept("mbxmoods-reset-20260101-000000.zip"), "reset-kept: an earlier reset's archive");
-            assert(ResetCommand.IsKept("MBXMOODS-RESET-20260101-000000.ZIP"), "reset-kept: whatever the case");
-            assert(ResetCommand.IsKept("mbxmoods-schema.json"), "reset-kept: the field registry");
-            assert(!ResetCommand.IsKept("mbxmoods-errors.csv"), "reset-kept: the error list goes");
-            assert(!ResetCommand.IsKept("mbxmoods-skipped.csv"), "reset-kept: the skip list goes");
-            assert(!ResetCommand.IsKept(ReviewLedger.FileName), "reset-kept: the review records go");
-            assert(!ResetCommand.IsKept(Program.MoodsFileName), "reset-kept: the catalog goes");
+            const bool K = true, T = false;   // kept / taken (archived, then removed)
+            var rows = new (string Name, bool Clear, bool Reset, string Why)[]
+            {
+                // truedat's analysis data: both take it
+                (Program.MoodsFileName, T, T, "the catalog"), ("mbxmoods.json.1", T, T, "a catalog part"), ("mbxmoods.mbxs", T, T, "the sidecar"),
+                ("mbxedges.v1.json", T, T, "the edges file"), ("truedat.db", T, T, "the store"), ("truedat.db-wal", T, T, "the store's log"),
+                ("store-result.json", T, T, "a store-*.json record"), ("mbxmoods-errors.csv", T, T, "the error list"), ("mbxmoods-skipped.csv", T, T, "the skip list"),
+                ("mbxmoods-scan-2026-11-21-1.txt", T, T, "a scan summary"), ("truedat.log", T, T, "the log"),
+                ("mbxmoods.json.bak.20261121.010203.zip", T, T, "a catalog backup"), ("truedat.db.bak.v4.20261121-010203", T, T, "a store backup"),
+                (ReviewLedger.FileName, T, T, "the review ledger (clear carries its ignore decisions into a new one)"),
+                // the duplicate report files: both take them
+                ("mbxmoods-duplicates.json", T, T, "the duplicate report"), ("mbxmoods-duplicates.html", T, T, "the duplicate page"),
+                ("mbxmoods-duplicate-losers.m3u8", T, T, "the losers playlist"),
+                // the operator's own files: clear keeps them, reset takes them
+                (ExclusionStore.FileName, K, T, "the exclusion rules"), (ExclusionStore.FileName + ".bak.20260101-000000.zip", K, T, "the rules' own backups"),
+                ("mbxmoods-exclude.m3u8", K, T, "the exclusion playlist"), (ExclusionStore.ApplyResultFileName, K, T, "apply-result.json"),
+                (WorkFolder.DedupeVerdictsFileName, K, T, "the duplicate verdicts"),
+                // kept by both
+                ("mbxmoods-snapshot-20260101-000000.zip", K, K, "a snapshot"), ("mbxmoods-reset-20260101-000000.zip", K, K, "an earlier reset archive"),
+                ("MBXMOODS-RESET-20260101-000000.ZIP", K, K, "an earlier reset archive, whatever the case"), ("mbxmoods-clear-20260101-000000.zip", K, K, "an earlier clear archive"),
+                (TruedatConfig.FileName, K, K, "the config file"), ("mbxmoods-schema.json", K, K, "the field registry"),
+                (ExclusionStore.FileName + ExclusionStore.LockFileSuffix, K, K, "the rules' lock file (a mechanism, never deleted)"),
+            };
+            foreach (var r in rows)
+            {
+                bool c = ResetCommand.Keeps(ResetCommand.Verb.Clear, r.Name), s = ResetCommand.Keeps(ResetCommand.Verb.Reset, r.Name);
+                string Say(bool kept) => kept ? "keeps" : "takes";
+                assert(c == r.Clear && s == r.Reset, $"keep table: {r.Name} ({r.Why}): --clear {Say(r.Clear)}, --reset {Say(r.Reset)} (got {Say(c)} / {Say(s)})");
+            }
+            foreach (var n in new[] { ExclusionStore.FileName, ExclusionStore.ApplyResultFileName, WorkFolder.DedupeVerdictsFileName, "mbxmoods-exclude.m3u8" })
+                assert(ResetCommand.IsOperatorFile(n), $"keep table: {n} is one of the operator's own files");
+            foreach (var n in new[] { Program.MoodsFileName, "mbxmoods-duplicates.json", ExclusionStore.FileName + ExclusionStore.LockFileSuffix, "notes.txt" })
+                assert(!ResetCommand.IsOperatorFile(n), $"keep table: {n} is not one of the operator's own files");
         }
 
         static void TestConfirm(Action<bool, string> assert)
         {
-            var sink = new StringWriter();
-            string? Never() => throw new InvalidOperationException("the prompt was read");
-            assert(ResetCommand.Confirm(true, false, Never, sink) == ResetCommand.Confirmation.Confirmed, "reset-confirm: --imeanit confirms without asking");
-            assert(ResetCommand.Confirm(true, true, Never, sink) == ResetCommand.Confirmation.Confirmed, "reset-confirm: --imeanit confirms when nobody is at the console");
-            assert(ResetCommand.Confirm(false, true, Never, sink) == ResetCommand.Confirmation.NotAsked,
-                "reset-confirm: with no console and no flag nothing is read and nothing is confirmed");
-            assert(sink.ToString().Length == 0, "reset-confirm: no prompt is written when nobody can answer it");
+            foreach (var verb in new[] { ResetCommand.Verb.Clear, ResetCommand.Verb.Reset })
+            {
+                string word = verb == ResetCommand.Verb.Clear ? "CLEAR" : "RESET", other = verb == ResetCommand.Verb.Clear ? "RESET" : "CLEAR";
+                string tag = verb == ResetCommand.Verb.Clear ? "clear-confirm" : "reset-confirm";
+                assert(ResetCommand.WordOf(verb) == word, $"{tag}: the word to type is {word} ({ResetCommand.WordOf(verb)})");
+                var sink = new StringWriter();
+                string? Never() => throw new InvalidOperationException("the prompt was read");
+                assert(ResetCommand.Confirm(verb, true, false, Never, sink) == ResetCommand.Confirmation.Confirmed, $"{tag}: --imeanit confirms without asking");
+                assert(ResetCommand.Confirm(verb, true, true, Never, sink) == ResetCommand.Confirmation.Confirmed, $"{tag}: --imeanit confirms when nobody is at the console");
+                assert(ResetCommand.Confirm(verb, false, true, Never, sink) == ResetCommand.Confirmation.NotAsked,
+                    $"{tag}: with no console and no flag nothing is read and nothing is confirmed");
+                assert(sink.ToString().Length == 0, $"{tag}: no prompt is written when nobody can answer it");
 
-            ResetCommand.Confirmation Typed(string? line) { var w = new StringWriter(); return ResetCommand.Confirm(false, false, () => line, w); }
-            assert(Typed("RESET") == ResetCommand.Confirmation.Confirmed, "reset-confirm: typing the word confirms");
-            assert(Typed("  RESET  ") == ResetCommand.Confirmation.Confirmed, "reset-confirm: surrounding spaces do not matter");
-            assert(Typed("reset") == ResetCommand.Confirmation.Declined, "reset-confirm: the word is case-sensitive (a reflex 'reset' is not it)");
-            assert(Typed("yes") == ResetCommand.Confirmation.Declined, "reset-confirm: yes is not the word");
-            assert(Typed("y") == ResetCommand.Confirmation.Declined, "reset-confirm: y is not the word");
-            assert(Typed("") == ResetCommand.Confirmation.Declined, "reset-confirm: Enter alone declines");
-            assert(Typed(null) == ResetCommand.Confirmation.Declined, "reset-confirm: end of input declines");
-            var asked = new StringWriter();
-            ResetCommand.Confirm(false, false, () => "no", asked);
-            assert(asked.ToString().Contains(ResetCommand.ConfirmWord), "reset-confirm: the prompt says which word to type");
+                ResetCommand.Confirmation Typed(string? line) { var w = new StringWriter(); return ResetCommand.Confirm(verb, false, false, () => line, w); }
+                assert(Typed(word) == ResetCommand.Confirmation.Confirmed, $"{tag}: typing {word} confirms");
+                assert(Typed("  " + word + "  ") == ResetCommand.Confirmation.Confirmed, $"{tag}: surrounding spaces do not matter");
+                assert(Typed(word.ToLowerInvariant()) == ResetCommand.Confirmation.Declined, $"{tag}: the word is case-sensitive (a reflex '{word.ToLowerInvariant()}' is not it)");
+                assert(Typed(other) == ResetCommand.Confirmation.Declined, $"{tag}: the other verb's word is not it");
+                assert(Typed("yes") == ResetCommand.Confirmation.Declined, $"{tag}: yes is not the word");
+                assert(Typed("") == ResetCommand.Confirmation.Declined, $"{tag}: Enter alone declines");
+                assert(Typed(null) == ResetCommand.Confirmation.Declined, $"{tag}: end of input declines");
+                var asked = new StringWriter();
+                ResetCommand.Confirm(verb, false, false, () => "no", asked);
+                assert(asked.ToString().Contains(word), $"{tag}: the prompt says which word to type");
+            }
         }
 
         static void TestAbsentLibrary(Action<bool, string> assert)
@@ -210,27 +253,38 @@ namespace Truedat
                     "truedat.db.bak.v2.20260101-000000", "mbxmoods-errors.csv", "mbxmoods-errors.log", "mbxmoods-skipped.csv",
                     "mbxmoods-scan-2026-01-01-1.txt", "mbxmoods-verify.csv", "store-result.json", "store-import-result.json",
                     "mbxmoods.json.bak.20260101-000000.zip", "mbxmoods.json.imported.abc123.zip", "truedat.log",
+                    "mbxmoods-duplicates.json", "mbxmoods-duplicate-losers.m3u8",
                 };
-                // What is not scan output, or is an archive somebody made on purpose, or is not ours at all.
+                // The operator's own files: --clear keeps them, --reset takes them.
+                var operators = new[] { "mbxmoods-exclude.json", "apply-result.json", "mbxmoods-duplicates.verdicts.json" };
+                // An archive somebody made on purpose, the config file, and what is not truedat's at all: both keep them.
                 var theirs = new[]
                 {
-                    "mbxmoods-exclude.json", "mbxmoods-snapshot-20260101-000000.zip", "mbxmoods-reset-20250101-000000.zip",
-                    "truedat.config.json", "notes.txt", "iTunes Music Library.xml",
+                    "mbxmoods-snapshot-20260101-000000.zip", "mbxmoods-reset-20250101-000000.zip", "mbxmoods-clear-20250101-000000.zip",
+                    "mbxmoods-exclude.json.lock", "truedat.config.json", "notes.txt", "iTunes Music Library.xml",
                 };
                 foreach (var n in ours) Put(lib, n);
+                foreach (var n in operators) Put(lib, n);
                 foreach (var n in theirs) Put(lib, n);
                 Put(review, ReviewLedger.FileName);
                 Put(review, "preview.json");
 
                 var catalog = Path.Combine(lib, "mbxmoods.json");
-                var files = ResetCommand.Collect(catalog, Path.Combine(lib, "truedat.db"), Path.Combine(review, ReviewLedger.FileName));
-                var got = string.Join("|", files.Select(f => f.EntryName).OrderBy(s => s, StringComparer.Ordinal));
-                var want = string.Join("|", ours.Concat(new[] { "review/" + ReviewLedger.FileName }).OrderBy(s => s, StringComparer.Ordinal));
-                assert(got == want, "reset-collect: the file set is everything truedat wrote and nothing else" + (got == want ? "" : $"\n      got  {got}\n      want {want}"));
+                string Names(IEnumerable<(string Path, string EntryName)> fs) => string.Join("|", fs.Select(f => f.EntryName).OrderBy(s => s, StringComparer.Ordinal));
+                string Want(IEnumerable<string> names) => string.Join("|", names.OrderBy(s => s, StringComparer.Ordinal));
+                var ledgerPath = Path.Combine(review, ReviewLedger.FileName);
+
+                var resetFiles = ResetCommand.Collect(ResetCommand.Verb.Reset, catalog, Path.Combine(lib, "truedat.db"), ledgerPath);
+                var resetWant = Want(ours.Concat(operators).Concat(new[] { "review/" + ReviewLedger.FileName }));
+                assert(Names(resetFiles) == resetWant, "reset-collect: --reset takes everything truedat wrote AND the operator's own files" + (Names(resetFiles) == resetWant ? "" : $"\n      got  {Names(resetFiles)}\n      want {resetWant}"));
+
+                var files = ResetCommand.Collect(ResetCommand.Verb.Clear, catalog, Path.Combine(lib, "truedat.db"), ledgerPath);
+                var want = Want(ours.Concat(new[] { "review/" + ReviewLedger.FileName }));
+                assert(Names(files) == want, "clear-collect: --clear takes everything truedat wrote and keeps the operator's own files" + (Names(files) == want ? "" : $"\n      got  {Names(files)}\n      want {want}"));
                 assert(files.All(f => File.Exists(f.Path)), "reset-collect: every listed file is a file on disk");
 
                 // No store named: a store sitting at the default place is still this library's file.
-                var noStore = ResetCommand.Collect(catalog, null, null);
+                var noStore = ResetCommand.Collect(ResetCommand.Verb.Clear, catalog, null, null);
                 assert(!noStore.Any(f => f.EntryName.StartsWith("review/", StringComparison.Ordinal)), "reset-collect: no review path given, no review entry");
 
                 // A store kept somewhere else (--store-dir, or a network library's local store).
@@ -238,7 +292,8 @@ namespace Truedat
                 Put(far, "truedat.db.bak.v2.20260101-000000");
                 // That folder is not this library's: another library's lists, a log and an exported edges file may sit there too.
                 Put(far, "mbxmoods-errors.csv"); Put(far, "truedat.log"); Put(far, "mbxedges.v1.json"); Put(far, "other.db");
-                var split = ResetCommand.Collect(catalog, Path.Combine(far, "truedat.db"), null);
+                Put(far, "mbxmoods-exclude.json");
+                var split = ResetCommand.Collect(ResetCommand.Verb.Reset, catalog, Path.Combine(far, "truedat.db"), null);
                 var farGot = string.Join("|", split.Where(f => f.EntryName.StartsWith("store/", StringComparison.Ordinal)).Select(f => f.EntryName).OrderBy(s => s, StringComparer.Ordinal));
                 assert(farGot == "store/store-result.json|store/truedat.db|store/truedat.db-wal|store/truedat.db.bak.v2.20260101-000000",
                     $"reset-collect: from a store's own folder, only the store, what is named after it, and its result files ({farGot})");
@@ -251,7 +306,7 @@ namespace Truedat
                 assert(ResetCommand.FirstHeld(files) == null, "reset-held: with nothing holding them, nothing is named");
 
                 // ---- an archive that cannot be written removes nothing
-                var taken = Path.Combine(lib, "mbxmoods-reset-taken.zip");
+                var taken = Path.Combine(lib, "mbxmoods-clear-taken.zip");
                 File.WriteAllText(taken, "already here");
                 bool threw = false;
                 try { ResetCommand.Execute(files, taken); } catch (IOException) { threw = true; }
@@ -259,21 +314,27 @@ namespace Truedat
                 assert(files.All(f => File.Exists(f.Path)), "reset-execute: and when the archive is not written, no file is removed");
                 assert(File.ReadAllText(taken) == "already here", "reset-execute: the file already at that name is not written over");
 
-                // ---- the real thing, with a leftover from a reset that was stopped while it was archiving
-                var staleTemp = Path.Combine(lib, "mbxmoods-reset-20250505-050505.zip.tmp");
-                File.WriteAllText(staleTemp, "half an archive");
+                // ---- the real thing (--clear's set), with leftovers from a clear and a reset stopped while archiving
+                var staleReset = Path.Combine(lib, "mbxmoods-reset-20250505-050505.zip.tmp");
+                var staleClear = Path.Combine(lib, "mbxmoods-clear-20250505-050505.zip.tmp");
+                File.WriteAllText(staleReset, "half an archive"); File.WriteAllText(staleClear, "half an archive");
+                var operatorTimes = operators.ToDictionary(n => n, n => File.GetLastWriteTimeUtc(Path.Combine(lib, n)));
                 var before = files.ToDictionary(f => f.EntryName, f => File.ReadAllBytes(f.Path), StringComparer.Ordinal);
-                var zipPath = Path.Combine(lib, "mbxmoods-reset-20260102-030405.zip");
+                var zipPath = Path.Combine(lib, "mbxmoods-clear-20260102-030405.zip");
                 var result = ResetCommand.Execute(files, zipPath);
                 assert(File.Exists(zipPath), "reset-execute: the archive is written");
-                assert(!File.Exists(staleTemp), "reset-execute: an unfinished archive left by an earlier reset is removed, not kept for good");
-                assert(File.Exists(Path.Combine(lib, "mbxmoods-reset-20250101-000000.zip")), "reset-execute: a finished earlier archive is still kept");
+                assert(!File.Exists(staleReset) && !File.Exists(staleClear), "reset-execute: an unfinished archive left by an earlier clear or reset is removed, not kept for good");
+                assert(File.Exists(Path.Combine(lib, "mbxmoods-reset-20250101-000000.zip")) && File.Exists(Path.Combine(lib, "mbxmoods-clear-20250101-000000.zip")),
+                    "reset-execute: finished earlier archives are still kept");
                 assert(result.Archived == files.Count && result.NotRemoved.Count == 0, $"reset-execute: every file archived and removed ({result.Archived} of {files.Count}, {result.NotRemoved.Count} left)");
                 assert(result.Bytes == before.Values.Sum(b => (long)b.Length), $"reset-execute: the byte count is the files' own ({result.Bytes})");
                 var left = files.Where(f => File.Exists(f.Path)).Select(f => f.EntryName).ToList();
                 assert(left.Count == 0, "reset-execute: none of them is left on disk" + (left.Count > 0 ? " (" + string.Join(", ", left) + ")" : ""));
                 foreach (var n in theirs)
                     assert(File.Exists(Path.Combine(lib, n)) && File.ReadAllText(Path.Combine(lib, n)) == "content of " + n, $"reset-execute: {n} is untouched");
+                foreach (var n in operators)
+                    assert(File.ReadAllText(Path.Combine(lib, n)) == "content of " + n && File.GetLastWriteTimeUtc(Path.Combine(lib, n)) == operatorTimes[n],
+                        $"clear-execute: {n} is untouched, bytes and time");
                 assert(File.Exists(Path.Combine(review, "preview.json")), "reset-execute: another manifest in the review folder is untouched");
                 using (var zip = ZipFile.OpenRead(zipPath))
                 {
@@ -287,26 +348,122 @@ namespace Truedat
                     }
                     assert(same, "reset-execute: every archived file holds the bytes that were on disk" + (same ? "" : $" (differs: {firstBad})"));
                 }
-                assert(ResetCommand.Collect(catalog, Path.Combine(lib, "truedat.db"), Path.Combine(review, ReviewLedger.FileName)).Count == 0,
-                    "reset-execute: a second look finds nothing left to reset (the archive itself is kept)");
+                assert(ResetCommand.Collect(ResetCommand.Verb.Clear, catalog, Path.Combine(lib, "truedat.db"), ledgerPath).Count == 0,
+                    "reset-execute: a second look finds nothing left to clear (the archive itself is kept)");
+                assert(ResetCommand.Collect(ResetCommand.Verb.Reset, catalog, Path.Combine(lib, "truedat.db"), ledgerPath).Select(f => f.EntryName).OrderBy(s => s, StringComparer.Ordinal).SequenceEqual(operators.OrderBy(s => s, StringComparer.Ordinal)),
+                    "reset-execute: and what a reset would still take is exactly the operator's own files");
 
-                var name = Path.GetFileName(ResetCommand.ArchivePathFor(catalog, new DateTime(2026, 1, 2, 3, 4, 5)));
-                assert(name == "mbxmoods-reset-20260102-030405.zip", $"reset-archive: named by its time, beside the catalog ({name})");
-                assert(ResetCommand.IsKept(name), "reset-archive: and the name it is given is one a later reset keeps");
+                var when = new DateTime(2026, 1, 2, 3, 4, 5);
+                var clearName = Path.GetFileName(ResetCommand.ArchivePathFor(ResetCommand.Verb.Clear, catalog, when));
+                var resetName = Path.GetFileName(ResetCommand.ArchivePathFor(ResetCommand.Verb.Reset, catalog, when));
+                assert(clearName == "mbxmoods-clear-20260102-030405.zip" && resetName == "mbxmoods-reset-20260102-030405.zip",
+                    $"reset-archive: each archive is named for its verb and its time ({clearName}, {resetName})");
+                assert(ResetCommand.Keeps(ResetCommand.Verb.Clear, clearName) && ResetCommand.Keeps(ResetCommand.Verb.Reset, clearName)
+                       && ResetCommand.Keeps(ResetCommand.Verb.Clear, resetName) && ResetCommand.Keeps(ResetCommand.Verb.Reset, resetName),
+                    "reset-archive: and the names they are given are ones a later clear or reset keeps");
             }
             catch (Exception ex) { assert(false, "reset: threw " + ex.GetType().Name + ": " + ex.Message); }
             finally { try { Directory.Delete(root, true); } catch { } }
         }
 
-        /// <summary>The verb itself, in a child process: refused without a confirmation (nothing changed), and with one the
-        /// old state is in the archive and the scan started from nothing.</summary>
+        /// <summary>--clear carries the operator's ignore decisions into a fresh review list: exactly those records, each the
+        /// same record byte for byte, in a list of the same kind written by the writer the scan uses.</summary>
+        static void TestIgnoreCarried(Action<bool, string> assert)
+        {
+            var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "clear-ignore-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(root);
+                var t0 = new DateTime(2026, 8, 17, 0, 0, 0, DateTimeKind.Utc);
+                var ledger = new ReviewLedger();
+                ledger.Upsert(new ReviewRecord { Path = @"D:\Music\ignored.flac", Disposition = ReviewDisposition.Failed, Reason = "decode failed", SizeMb = 12.34, DurationSec = 201.5,
+                    Components = { new ReviewComponent { Name = "essentia", Message = "boom", ExitCode = 1, DurationMs = 400 } } }, t0, false);
+                ledger.SetState(@"D:\Music\ignored.flac", ReviewState.Ignore);
+                ledger.Upsert(new ReviewRecord { Path = @"D:\Music\failed.flac", Disposition = ReviewDisposition.Failed, Reason = "old failure" }, t0, false);
+                ledger.Upsert(new ReviewRecord { Path = @"D:\Music\short.flac", Disposition = ReviewDisposition.Skipped, Reason = "shorter than the minimum" }, t0, false);
+                var oldPath = Path.Combine(root, "old.json");
+                assert(Program.SaveReviewLedger(ledger, oldPath, out _), "clear-ignore: the fixture ledger is written by the scan's writer");
+                var loaded = ReviewLedger.Load(oldPath, out var err);
+                assert(err == null && loaded.Count == 3, $"clear-ignore: the fixture holds an ignore, a failure and a policy record ({loaded.Count})");
+
+                var carried = loaded.IgnoreOnly();
+                assert(carried.Count == 1 && carried.Find(@"D:\Music\ignored.flac")?.State == ReviewState.Ignore,
+                    $"clear-ignore: only the ignore record is carried ({carried.Count})");
+                var newPath = Path.Combine(root, "new.json");
+                assert(Program.SaveReviewLedger(carried, newPath, out _), "clear-ignore: the new list is written by the same writer");
+                JsonNode? Record(string file, string path) => (JsonNode.Parse(File.ReadAllText(file))?["records"] as JsonArray)?
+                    .FirstOrDefault(r => string.Equals(r?["path"]?.GetValue<string>(), path, StringComparison.Ordinal));
+                var a = Record(oldPath, @"D:\Music\ignored.flac")?.ToJsonString();
+                var b = Record(newPath, @"D:\Music\ignored.flac")?.ToJsonString();
+                assert(a != null && a == b, "clear-ignore: the carried record is the same record, byte for byte" + (a == b ? "" : $"\n      was {a}\n      now {b}"));
+                var doc = JsonNode.Parse(File.ReadAllText(newPath));
+                assert(doc?["kind"]?.GetValue<string>() == ReviewLedger.Kind && (doc?["records"] as JsonArray)?.Count == 1,
+                    "clear-ignore: the new list is a review list of the same kind holding that one record");
+                assert(ledger.Count == 3 && loaded.Count == 3, "clear-ignore: picking the ignore records changes nothing in the list they came from");
+            }
+            catch (Exception ex) { assert(false, "clear-ignore: threw " + ex.GetType().Name + ": " + ex.Message); }
+            finally { try { Directory.Delete(root, true); } catch { } }
+        }
+
+        /// <summary>A reset archive holds the operator's own files at its top level; --restore puts them back where they were,
+        /// byte for byte — and refuses, naming the file, rather than write over a rule file that exists now. A snapshot also
+        /// carries the exclusion file, and restoring a snapshot leaves it in the archive, as it always has.</summary>
+        static void TestRuleRestore(Action<bool, string> assert)
+        {
+            var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "reset-rules-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                var src = Path.Combine(root, "src"); var lib = Path.Combine(root, "Library");
+                Directory.CreateDirectory(src); Directory.CreateDirectory(lib);
+                var content = new Dictionary<string, string>
+                {
+                    ["mbxmoods.json"] = "{\"tracks\":{}}", [ExclusionStore.FileName] = "{\"version\":1,\"rules\":[{\"kind\":\"file\"}]}",
+                    [ExclusionStore.ApplyResultFileName] = "{\"kind\":\"exclusion-apply-result\"}", [WorkFolder.DedupeVerdictsFileName] = "{\"version\":1,\"verdicts\":[]}",
+                    ["mbxmoods-errors.csv"] = "e",
+                };
+                foreach (var kv in content) File.WriteAllText(Path.Combine(src, kv.Key), kv.Value);
+                var entries = content.Keys.Where(k => k != "mbxmoods-errors.csv").Select(k => (Path.Combine(src, k), k))
+                    .Concat(new[] { (Path.Combine(src, "mbxmoods-errors.csv"), "work/mbxmoods-errors.csv") }).ToList();
+                var resetZip = Path.Combine(root, "mbxmoods-reset-20260101-000000.zip");
+                CatalogArchive.WriteZipBackup(entries, resetZip, requireWholeDocuments: false);
+
+                var rules = ResetCommand.RuleEntries(resetZip).OrderBy(s => s, StringComparer.Ordinal).ToList();
+                var wantRules = new[] { ExclusionStore.ApplyResultFileName, WorkFolder.DedupeVerdictsFileName, ExclusionStore.FileName }.OrderBy(s => s, StringComparer.Ordinal).ToList();
+                assert(rules.SequenceEqual(wantRules), $"reset-restore: the operator's files in a reset archive are found by name ({string.Join(", ", rules)})");
+
+                var snapZip = Path.Combine(root, "mbxmoods-snapshot-20260101-000000.zip");
+                File.WriteAllText(Path.Combine(src, CatalogArchive.ManifestEntryName), "{}");
+                CatalogArchive.WriteZipBackup(new[] { (Path.Combine(src, "mbxmoods.json"), "mbxmoods.json"), (Path.Combine(src, CatalogArchive.ManifestEntryName), CatalogArchive.ManifestEntryName),
+                                                      (Path.Combine(src, ExclusionStore.FileName), ExclusionStore.FileName) }, snapZip, requireWholeDocuments: false);
+                assert(ResetCommand.RuleEntries(snapZip).Count == 0, "reset-restore: a snapshot's exclusion file stays in the archive, as it always has");
+
+                File.WriteAllText(Path.Combine(lib, ExclusionStore.FileName), "a newer decision");
+                var conflicts = ResetCommand.RuleConflicts(rules, lib);
+                assert(conflicts.Count == 1 && conflicts[0].EndsWith(ExclusionStore.FileName, StringComparison.OrdinalIgnoreCase),
+                    $"reset-restore: a rule file that exists now is named before anything is restored ({string.Join(", ", conflicts)})");
+                File.Delete(Path.Combine(lib, ExclusionStore.FileName));
+                assert(ResetCommand.RuleConflicts(rules, lib).Count == 0, "reset-restore: with none in the way, nothing is named");
+                int put = ResetCommand.RestoreRules(resetZip, rules, lib);
+                assert(put == 3, $"reset-restore: each one is put back ({put})");
+                foreach (var r in wantRules)
+                    assert(File.Exists(Path.Combine(lib, r)) && File.ReadAllText(Path.Combine(lib, r)) == content[r], $"reset-restore: {r} is back, byte for byte");
+                assert(!File.Exists(Path.Combine(lib, "mbxmoods-errors.csv")) && !File.Exists(Path.Combine(lib, "mbxmoods.json")),
+                    "reset-restore: only the operator's files are put back by this step");
+            }
+            catch (Exception ex) { assert(false, "reset-restore: threw " + ex.GetType().Name + ": " + ex.Message); }
+            finally { try { Directory.Delete(root, true); } catch { } }
+        }
+
+        /// <summary>The verbs themselves, in child processes: refused without a confirmation (nothing changed); --clear keeps
+        /// the operator's files and carries the ignore decisions; --reset takes them; --restore of the reset archive puts them
+        /// back, and refuses rather than write over one that exists now.</summary>
         static void TestCli(Action<bool, string> assert)
         {
             var exe = typeof(Program).Assembly.Location;
             var exeDir = Path.GetDirectoryName(exe) ?? ".";
             if (!File.Exists(Path.Combine(exeDir, "essentia_streaming_extractor_music.exe")))
             {
-                Console.WriteLine("  NOT RUN  reset through the scan: a library scan refuses to start without essentia_streaming_extractor_music.exe beside the test binary");
+                Console.WriteLine("  NOT RUN  clear/reset through the scan: a library scan refuses to start without essentia_streaming_extractor_music.exe beside the test binary");
                 return;
             }
             var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "reset-cli-" + Guid.NewGuid().ToString("N"));
@@ -322,7 +479,7 @@ namespace Truedat
 
                 // A track the extractor can analyze, made here when ffmpeg is beside the binary: that is what lets the test
                 // say the scan after the reset produced a fresh entry and exited 0. Without ffmpeg the embedded stub stands
-                // in — it is silent, so the extractor refuses it, and those two checks are reported as not run.
+                // in — it is silent, so the extractor refuses it, and those checks are reported as not run.
                 var track = Path.Combine(music, "track.flac");
                 var ffmpeg = Path.Combine(exeDir, "ffmpeg.exe");
                 bool analyzable = false;
@@ -347,40 +504,65 @@ namespace Truedat
                     + "\t\t\t<key>Location</key><string>" + new Uri(track).AbsoluteUri + "</string>\n\t\t</dict>\n"
                     + "\t</dict>\n</dict>\n</plist>\n");
 
-                // The old state: a catalog whose one entry is NOT something a scan would write, an error list, a skip
-                // list, a review record, and the operator's own exclusion file.
+                // The old state: a catalog whose one entry is NOT something a scan would write, an error list, a skip list,
+                // a review list with one ignore decision and one failure, and the operator's own files.
                 const string OldCatalog = "{\"version\":1,\"generatedBy\":\"reset-selftest\",\"trackCount\":0,\"tracks\":{}}";
                 var catalog = Path.Combine(lib, "mbxmoods.json");
                 var errors = Path.Combine(lib, "mbxmoods-errors.csv");
                 var skipped = Path.Combine(lib, "mbxmoods-skipped.csv");
-                var exclude = Path.Combine(lib, ExclusionStore.FileName);
                 var ledger = Path.Combine(review, ReviewLedger.FileName);
                 File.WriteAllText(catalog, OldCatalog);
                 File.WriteAllText(errors, "old error list\r\n");
                 File.WriteAllText(skipped, "old skip list\r\n");
-                const string Rules = "{\"version\":1,\"rules\":[]}";
-                File.WriteAllText(exclude, Rules);
+                var rules = new Dictionary<string, string>
+                {
+                    [ExclusionStore.FileName] = "{\"version\":1,\"rules\":[]}",
+                    [ExclusionStore.ApplyResultFileName] = "{\"schemaVersion\":1,\"kind\":\"exclusion-apply-result\",\"ok\":true}",
+                    [WorkFolder.DedupeVerdictsFileName] = "{\"version\":1,\"verdicts\":[]}",
+                };
+                foreach (var kv in rules) File.WriteAllText(Path.Combine(lib, kv.Key), kv.Value);
+                var ruleTimes = rules.Keys.ToDictionary(k => k, k => File.GetLastWriteTimeUtc(Path.Combine(lib, k)));
+                var ignoredPath = Path.Combine(music, "ignored.flac");
                 var seed = new ReviewLedger();
                 var t0 = new DateTime(2026, 8, 17, 0, 0, 0, DateTimeKind.Utc);
                 seed.Upsert(new ReviewRecord { Path = Path.Combine(music, "ghost.flac"), Disposition = ReviewDisposition.Failed, Reason = "old failure" }, t0, false);
-                File.WriteAllText(ledger, seed.ToJson("selftest", t0).ToJsonString());
+                seed.Upsert(new ReviewRecord { Path = ignoredPath, Disposition = ReviewDisposition.Failed, Reason = "the operator said ignore" }, t0, false);
+                seed.SetState(ignoredPath, ReviewState.Ignore);
+                Program.SaveReviewLedger(seed, ledger, out _);
                 var oldLedger = File.ReadAllText(ledger);
+                string? RecordOf(string file, string path)
+                {
+                    if (!File.Exists(file)) return null;
+                    return (JsonNode.Parse(File.ReadAllText(file))?["records"] as JsonArray)?
+                        .FirstOrDefault(r => string.Equals(r?["path"]?.GetValue<string>(), path, StringComparison.OrdinalIgnoreCase))?.ToJsonString();
+                }
+                var ignoredRecord = RecordOf(ledger, ignoredPath);
 
                 bool ok = true;
                 void Check(bool cond, string msg) { if (!cond) { ok = false; keep = true; } assert(cond, msg + (cond ? "" : "  [fixture kept: " + root + "]")); }
                 string common = "--no-config " + Q(xml) + " --no-store --stage-dir " + Q(stage) + " -p 1";
+                bool Unchanged() => File.ReadAllText(catalog) == OldCatalog && File.ReadAllText(errors) == "old error list\r\n"
+                                    && File.ReadAllText(skipped) == "old skip list\r\n" && File.ReadAllText(ledger) == oldLedger
+                                    && rules.All(kv => File.ReadAllText(Path.Combine(lib, kv.Key)) == kv.Value);
+                int Archives(string prefix) => Directory.GetFiles(lib, prefix + "*.zip").Length;
 
-                // ---- no confirmation: refused, and nothing on disk moved
-                var refused = RunChild(exe, lib, common + " --reset", out int refusedExit);
-                File.WriteAllText(Path.Combine(root, "refused.log"), refused);
-                Check(refusedExit == 2, $"reset-cli: without a confirmation the run is refused with exit 2 (got {refusedExit})");
-                Check(refused.Contains("--imeanit"), "reset-cli: the refusal names the flag that confirms it");
-                Check(File.ReadAllText(catalog) == OldCatalog && File.ReadAllText(errors) == "old error list\r\n"
-                      && File.ReadAllText(skipped) == "old skip list\r\n" && File.ReadAllText(ledger) == oldLedger,
-                    "reset-cli: a refused reset leaves every file as it was");
-                Check(Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*").Length == 0, "reset-cli: a refused reset writes no archive");
-
-                Check(refused.Contains("ignore"), "reset-cli: the list of what goes says the review list's ignore decisions go with it");
+                // ---- no confirmation: refused, nothing on disk moved, and the text says what each verb keeps and takes
+                var clearRefused = RunChild(exe, lib, common + " --clear", out int clearRefusedExit);
+                File.WriteAllText(Path.Combine(root, "clear-refused.log"), clearRefused);
+                Check(clearRefusedExit == 2 && clearRefused.Contains("--imeanit") && clearRefused.Contains("CLEAR"),
+                    $"clear-cli: without a confirmation the run is refused with exit 2, naming the word and the flag (got {clearRefusedExit})");
+                Check(clearRefused.Contains("exclusion rules") && clearRefused.Contains("duplicate verdicts") && clearRefused.Contains("ignore decisions") && clearRefused.Contains("settings"),
+                    "clear-cli: the confirmation text says it keeps your settings, exclusion rules, duplicate verdicts and ignore decisions");
+                var resetRefused = RunChild(exe, lib, common + " --reset", out int resetRefusedExit);
+                File.WriteAllText(Path.Combine(root, "reset-refused.log"), resetRefused);
+                Check(resetRefusedExit == 2 && resetRefused.Contains("RESET"), $"reset-cli: without a confirmation the run is refused with exit 2 (got {resetRefusedExit})");
+                var warn = resetRefused.Split('\n').FirstOrDefault(l => l.Contains("removes your exclusion rules")) ?? "";
+                Check(warn.Contains("duplicate verdicts") && warn.Contains("--clear"),
+                    $"reset-cli: one line says it removes the exclusion rules and the duplicate verdicts, and that --clear keeps them ({warn.Trim()})");
+                Check(rules.Keys.All(k => resetRefused.Contains(Path.Combine(lib, k))), "reset-cli: and the files it found are named");
+                Check(resetRefused.Contains("ignore"), "reset-cli: the text says the review list's ignore decisions go too");
+                Check(Unchanged() && Archives(ResetCommand.ArchivePrefix) + Archives(ResetCommand.ClearArchivePrefix) == 0,
+                    "reset-cli: a refused clear or reset leaves every file as it was and writes no archive");
 
                 // ---- no library named and none found: a refusal, never a help page and exit 0. Run WITHOUT the confirmation and
                 //      with nothing to discover, so whatever a discovery ladder turned up on the machine running this, nothing changes.
@@ -388,58 +570,109 @@ namespace Truedat
                 var lost = RunChild(exe, nowhere, "--no-config --reset", out int lostExit, appData: nowhere);
                 File.WriteAllText(Path.Combine(root, "nolibrary.log"), lost);
                 Check(lostExit == 2, $"reset-cli: --reset with no library to reset is refused with exit 2, not reported as a success (got {lostExit})");
+                var lostClear = RunChild(exe, nowhere, "--no-config --clear", out int lostClearExit, appData: nowhere);
+                File.WriteAllText(Path.Combine(root, "nolibrary-clear.log"), lostClear);
+                Check(lostClearExit == 2, $"clear-cli: --clear with no library is refused with exit 2 (got {lostClearExit})");
 
-                // ---- another verb on the line: refused before anything
-                var mixed = RunChild(exe, lib, common + " --reset --imeanit --fixup", out int mixedExit);
-                File.WriteAllText(Path.Combine(root, "mixed.log"), mixed);
-                Check(mixedExit == 2 && mixed.Contains("--fixup"), $"reset-cli: --reset beside another verb is refused naming it (exit {mixedExit})");
-                Check(File.ReadAllText(catalog) == OldCatalog && Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*").Length == 0,
-                    "reset-cli: and that refusal changed nothing either");
-
-                // ---- confirmed
-                var done = RunChild(exe, lib, common + " --reset --imeanit", out int doneExit);
-                File.WriteAllText(Path.Combine(root, "reset.log"), done);
-                var archives = Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*.zip");
-                Check(archives.Length == 1, $"reset-cli: one archive is written beside the catalog ({archives.Length})");
-                if (archives.Length == 1)
+                // ---- another verb on the line, the two together, --imeanit alone: refused before anything
+                foreach (var (line, named, tag) in new[]
                 {
-                    using var zip = ZipFile.OpenRead(archives[0]);
-                    string Read(string entry)
-                    {
-                        var e = zip.GetEntry(entry); if (e == null) return "<absent>";
-                        using var r = new StreamReader(e.Open()); return r.ReadToEnd();
-                    }
-                    Check(Read("mbxmoods.json") == OldCatalog, "reset-cli: the archive holds the catalog as it was");
-                    Check(Read("mbxmoods-errors.csv") == "old error list\r\n", "reset-cli: and the error list");
-                    Check(Read("mbxmoods-skipped.csv") == "old skip list\r\n", "reset-cli: and the skip list");
-                    Check(Read("review/" + ReviewLedger.FileName) == oldLedger, "reset-cli: and the review records");
-                    Check(zip.GetEntry(ExclusionStore.FileName) == null, "reset-cli: the exclusion rules are not in it");
+                    (" --reset --imeanit --fixup", "--fixup", "reset-cli: --reset beside another verb"),
+                    (" --clear --imeanit --fixup", "--fixup", "clear-cli: --clear beside another verb"),
+                    (" --clear --reset --imeanit", "--reset", "clear-cli: --clear and --reset together"),
+                    (" --imeanit", "--imeanit", "reset-cli: --imeanit with neither verb"),
+                })
+                {
+                    var mixed = RunChild(exe, lib, common + line, out int mixedExit);
+                    File.WriteAllText(Path.Combine(root, "mixed-" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".log"), mixed);
+                    Check(mixedExit == 2 && mixed.Contains(named), $"{tag} is refused naming {named} (exit {mixedExit})");
+                    Check(Unchanged() && Archives(ResetCommand.ArchivePrefix) + Archives(ResetCommand.ClearArchivePrefix) == 0, $"{tag}: and that refusal changed nothing");
                 }
-                Check(File.ReadAllText(exclude) == Rules, "reset-cli: the exclusion rules are still in place, unchanged");
-                Check(!File.Exists(catalog) || !File.ReadAllText(catalog).Contains("reset-selftest"), "reset-cli: the old catalog is gone from the library folder");
-                Check(!File.Exists(errors) || !File.ReadAllText(errors).Contains("old error list"), "reset-cli: the old error list is gone");
-                Check(!File.Exists(skipped) || !File.ReadAllText(skipped).Contains("old skip list"), "reset-cli: the old skip list is gone");
-                Check(!File.Exists(ledger) || !File.ReadAllText(ledger).Contains("old failure"), "reset-cli: the old review record is gone");
-                Check(done.Contains("Loading iTunes library"), "reset-cli: the scan then runs in the same call");
-                Check(done.Contains("Existing moods: 0") && !done.Contains("(cached"), "reset-cli: and it starts from nothing — no entry loaded, none served from a cache");
-                Check(done.Contains("Reset:      archived 4 file(s)"), "reset-cli: the scan's summary says a reset preceded it");
+
+                // ---- --clear, confirmed
+                var cleared = RunChild(exe, lib, common + " --clear --imeanit", out int clearedExit);
+                File.WriteAllText(Path.Combine(root, "clear.log"), cleared);
+                var clearZips = Directory.GetFiles(lib, ResetCommand.ClearArchivePrefix + "*.zip");
+                Check(clearZips.Length == 1 && Archives(ResetCommand.ArchivePrefix) == 0, $"clear-cli: one mbxmoods-clear-<time>.zip is written ({clearZips.Length})");
+                if (clearZips.Length == 1)
+                {
+                    using var zip = ZipFile.OpenRead(clearZips[0]);
+                    string Read(string entry) { var e = zip.GetEntry(entry); if (e == null) return "<absent>"; using var r = new StreamReader(e.Open()); return r.ReadToEnd(); }
+                    Check(Read("mbxmoods.json") == OldCatalog && Read("mbxmoods-errors.csv") == "old error list\r\n" && Read("mbxmoods-skipped.csv") == "old skip list\r\n",
+                        "clear-cli: the archive holds the catalog and the lists as they were");
+                    Check(Read("review/" + ReviewLedger.FileName) == oldLedger, "clear-cli: and the whole review list as it was");
+                    Check(rules.Keys.All(k => zip.GetEntry(k) == null), "clear-cli: the operator's own files are not in it");
+                }
+                Check(rules.All(kv => File.ReadAllText(Path.Combine(lib, kv.Key)) == kv.Value && File.GetLastWriteTimeUtc(Path.Combine(lib, kv.Key)) == ruleTimes[kv.Key]),
+                    "clear-cli: the exclusion rules, apply-result.json and the duplicate verdicts are untouched, bytes and time");
+                string Now(string p) => File.Exists(p) ? File.ReadAllText(p) : "";
+                Check(!Now(catalog).Contains("reset-selftest") && !Now(errors).Contains("old error list") && !Now(skipped).Contains("old skip list"),
+                    "clear-cli: the old catalog and lists are gone");
+                Check(ignoredRecord != null && RecordOf(ledger, ignoredPath) == ignoredRecord, "clear-cli: the ignore decision is in the new review list, the same record byte for byte");
+                Check(RecordOf(ledger, Path.Combine(music, "ghost.flac")) == null, "clear-cli: the other records are gone");
+                Check(cleared.Contains("Existing moods: 0") && cleared.Contains("Clear:      archived"), "clear-cli: the scan then starts from nothing, and its summary says a clear preceded it");
+                var clearedCatalog = File.Exists(catalog) ? File.ReadAllBytes(catalog) : new byte[0];
+
+                // ---- --reset, confirmed: the operator's files go too
+                var reset = RunChild(exe, lib, common + " --reset --imeanit", out int resetExit);
+                File.WriteAllText(Path.Combine(root, "reset.log"), reset);
+                var resetZips = Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*.zip");
+                Check(resetZips.Length == 1, $"reset-cli: one mbxmoods-reset-<time>.zip is written ({resetZips.Length})");
+                if (resetZips.Length == 1)
+                {
+                    using var zip = ZipFile.OpenRead(resetZips[0]);
+                    string Read(string entry) { var e = zip.GetEntry(entry); if (e == null) return "<absent>"; using var r = new StreamReader(e.Open()); return r.ReadToEnd(); }
+                    Check(rules.All(kv => Read(kv.Key) == kv.Value), "reset-cli: the archive holds the exclusion rules, apply-result.json and the duplicate verdicts");
+                    Check(Read("review/" + ReviewLedger.FileName).Contains("the operator said ignore"), "reset-cli: and the review list with its ignore decision");
+                }
+                Check(rules.Keys.All(k => !File.Exists(Path.Combine(lib, k))), "reset-cli: and they are gone from the library folder");
+                Check(RecordOf(ledger, ignoredPath) == null, "reset-cli: the ignore decision is gone with the review list");
+                Check(Archives(ResetCommand.ClearArchivePrefix) == 1, "reset-cli: the earlier clear archive is kept");
+                Check(reset.Contains("Reset:      archived"), "reset-cli: the scan's summary says a reset preceded it");
+
+                // ---- --restore of the reset archive: refused while a rule file is in the way, then everything back
+                if (resetZips.Length == 1)
+                {
+                    var newer = Path.Combine(lib, ExclusionStore.FileName);
+                    File.WriteAllText(newer, "a newer decision");
+                    var catalogBefore = File.Exists(catalog) ? File.ReadAllBytes(catalog) : new byte[0];
+                    var blocked = RunChild(exe, lib, "--no-config --no-store --restore " + Q(resetZips[0]) + " --moods " + Q(catalog), out int blockedExit);
+                    File.WriteAllText(Path.Combine(root, "restore-blocked.log"), blocked);
+                    Check(blockedExit != 0 && blocked.Contains(newer), $"reset-restore-cli: a rule file that exists now stops the restore, named (exit {blockedExit})");
+                    Check(File.ReadAllText(newer) == "a newer decision" && (File.Exists(catalog) ? File.ReadAllBytes(catalog) : new byte[0]).SequenceEqual(catalogBefore),
+                        "reset-restore-cli: and nothing was changed — not the newer rule file, not the catalog");
+                    File.Delete(newer);
+                    var back = RunChild(exe, lib, "--no-config --no-store --restore " + Q(resetZips[0]) + " --moods " + Q(catalog), out int backExit);
+                    File.WriteAllText(Path.Combine(root, "restore-reset.log"), back);
+                    Check(backExit == 0 && back.Contains("Restored:"), $"reset-restore-cli: --restore of the reset archive brings the catalog back (exit {backExit})");
+                    Check(File.ReadAllBytes(catalog).SequenceEqual(clearedCatalog), "reset-restore-cli: the catalog is byte-identical to the one the reset archived");
+                    Check(rules.All(kv => File.Exists(Path.Combine(lib, kv.Key)) && File.ReadAllText(Path.Combine(lib, kv.Key)) == kv.Value),
+                        "reset-restore-cli: and every rule file is back, byte for byte");
+                }
+                if (clearZips.Length == 1)
+                {
+                    var backClear = RunChild(exe, lib, "--no-config --no-store --restore " + Q(clearZips[0]) + " --moods " + Q(catalog), out int backClearExit);
+                    File.WriteAllText(Path.Combine(root, "restore-clear.log"), backClear);
+                    Check(backClearExit == 0 && File.Exists(catalog) && File.ReadAllText(catalog) == OldCatalog, $"clear-restore-cli: --restore of the clear archive brings the old catalog back byte for byte (exit {backClearExit})");
+                }
+
                 if (analyzable)
                 {
-                    Check(doneExit == 0, $"reset-cli: the reset and its scan exit 0 (got {doneExit})");
-                    Check(File.Exists(catalog) && File.ReadAllText(catalog).Contains("track.flac"), "reset-cli: the new catalog holds the track, measured by this run");
+                    Check(resetExit == 0 && clearedExit == 0, $"reset-cli: the clear, the reset and their scans exit 0 (got {clearedExit}, {resetExit})");
 
                     // ---- with a store: the scan after the reset makes the store again
                     string withStore = "--no-config " + Q(xml) + " --store --stage-dir " + Q(stage) + " -p 1";
                     var seeded = RunChild(exe, lib, withStore, out int seededExit);
                     File.WriteAllText(Path.Combine(root, "store-scan.log"), seeded);
                     Check(seededExit == 0 && File.Exists(Path.Combine(lib, "truedat.db")), $"reset-cli: a scan with a store makes one (exit {seededExit})");
-                    var again = RunChild(exe, lib, withStore + " --reset --imeanit", out int againExit);
-                    File.WriteAllText(Path.Combine(root, "store-reset.log"), again);
-                    Check(againExit == 0 && File.Exists(Path.Combine(lib, "truedat.db")), $"reset-cli: a library with a store has one again after the reset (exit {againExit})");
-                    Check(again.Contains("truedat.db") && again.Contains("Existing moods: 0"), "reset-cli: the old store was archived with the rest and the scan started from nothing");
-                    Check(Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*.zip").Length == 2, "reset-cli: the second reset wrote its own archive and left the first one alone");
-
-                    // ---- going back without a store in force: the catalog returns, and the run says the archive holds a store too
+                    foreach (var verb in new[] { "--clear", "--reset" })
+                    {
+                        if (verb == "--reset") foreach (var k in rules.Keys) { var p = Path.Combine(lib, k); if (File.Exists(p)) File.Delete(p); }
+                        var again = RunChild(exe, lib, withStore + " " + verb + " --imeanit", out int againExit);
+                        File.WriteAllText(Path.Combine(root, "store" + verb + ".log"), again);
+                        Check(againExit == 0 && File.Exists(Path.Combine(lib, "truedat.db")), $"reset-cli: a library with a store has one again after {verb} (exit {againExit})");
+                        Check(again.Contains("truedat.db") && again.Contains("Existing moods: 0"), $"reset-cli: {verb} archived the old store with the rest and the scan started from nothing");
+                    }
                     var newest = Directory.GetFiles(lib, ResetCommand.ArchivePrefix + "*.zip").OrderBy(f => f, StringComparer.Ordinal).Last();
                     var back = RunChild(exe, lib, "--no-config --no-store --restore " + Q(newest) + " --moods " + Q(catalog), out int backExit);
                     File.WriteAllText(Path.Combine(root, "restore.log"), back);
@@ -447,7 +680,7 @@ namespace Truedat
                     Check(back.Contains("--store"), "reset-cli: and when the archive also holds a store that was not restored, the run says so and how to get it");
                 }
                 else
-                    Console.WriteLine("  NOT RUN  reset-cli exit code and fresh entry: needs ffmpeg.exe beside the test binary to make a track the extractor will analyze");
+                    Console.WriteLine("  NOT RUN  reset-cli exit codes, fresh entries and the store: needs ffmpeg.exe beside the test binary to make a track the extractor will analyze");
                 if (!ok) Console.WriteLine("    logs: " + root);
             }
             catch (Exception ex)
