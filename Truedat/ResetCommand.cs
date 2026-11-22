@@ -311,8 +311,14 @@ namespace Truedat
 
         /// <summary>The archive is a working file: the library's work folder (<see cref="WorkFolder"/>), named for its verb.</summary>
         internal static string ArchivePathFor(Verb verb, string catalogPath, DateTime nowLocal)
-            => WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".",
-                                PrefixOf(verb) + nowLocal.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + ".zip");
+            => WorkFolder.Write(Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? ".", ArchiveNameFor(verb, nowLocal));
+
+        /// <summary>Where the archive WOULD go, with nothing created: the inventory before the confirmation shows this (review #9).</summary>
+        internal static string ArchivePathPreview(Verb verb, string catalogPath, DateTime nowLocal)
+            => Path.Combine(WorkFolder.For(Path.GetDirectoryName(Path.GetFullPath(catalogPath)) ?? "."), ArchiveNameFor(verb, nowLocal));
+
+        internal static string ArchiveNameFor(Verb verb, DateTime nowLocal)
+            => PrefixOf(verb) + nowLocal.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + ".zip";
 
         // ---- the review list across --clear ------------------------------------------------------------------------------
 
@@ -323,6 +329,34 @@ namespace Truedat
             if (verb != Verb.Clear) return null;
             var carried = before.IgnoreOnly();
             return carried.Count > 0 ? carried : null;
+        }
+
+        /// <summary>Review #18: the ignore decisions <c>--clear</c> carries, taken from the review list that was actually ARCHIVED — not
+        /// from the copy read before the confirmation prompt. A decision changed in the hub while the prompt waited is then the one
+        /// carried, and the new list can never disagree with the archive it came out of. <paramref name="entryName"/> is the
+        /// ledger's name inside the archive (<c>review/&lt;name&gt;</c>, or the bare name beside the catalog). Null carried and null error
+        /// when the archive holds no review list or it has no ignore decision; an error when the archived list cannot be read.</summary>
+        internal static ReviewLedger? CarriedFromArchive(Verb verb, string archivePath, string entryName, out string? error)
+        {
+            error = null;
+            if (verb != Verb.Clear) return null;
+            var tmp = Path.Combine(Path.GetTempPath(), "truedat-carried-" + Guid.NewGuid().ToString("N") + ".json");
+            try
+            {
+                using (var zip = ZipFile.OpenRead(archivePath))
+                {
+                    var e = zip.GetEntry(entryName);
+                    if (e == null) return null;
+                    using var src = e.Open();
+                    using var dst = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    src.CopyTo(dst);
+                }
+                var archived = ReviewLedger.Load(tmp, out var loadErr);
+                if (loadErr != null) { error = loadErr; return null; }
+                return CarriedLedger(verb, archived);
+            }
+            catch (Exception ex) { error = ex.Message; return null; }
+            finally { try { File.Delete(tmp); } catch { } }
         }
 
         // ---- the operator's files across --restore ----------------------------------------------------------------------

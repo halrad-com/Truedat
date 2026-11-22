@@ -31,11 +31,63 @@ namespace Truedat
             TestStoreIsWholeBeforeArchiving(assert);
             TestCollectAndExecute(assert);
             TestIgnoreCarried(assert);
+            TestCarriedFromArchive(assert);
             TestRuleRestore(assert);
             TestRestoreArchiveShapes(assert);
             TestPlaylistInPlaylistsFolder(assert);
             TestRestoreInputAndRecord(assert);
+            TestRefusalMovesNothing(assert);
             TestCli(assert);
+        }
+
+        /// <summary>Review #9: an unattended --reset with no --imeanit is refused (exit 2) — and before this fix, the library scan's entry
+        /// had already settled the work folder and moved the working files beside the catalog into it. A refusal changes nothing, so
+        /// the inventory is taken without settling anything and the folder is settled only after the confirmation.</summary>
+        static void TestRefusalMovesNothing(Action<bool, string> assert)
+        {
+            var exe = typeof(Program).Assembly.Location;
+            if (!File.Exists(Path.Combine(Path.GetDirectoryName(exe) ?? ".", "essentia_streaming_extractor_music.exe")))
+            {
+                Console.WriteLine("  NOT RUN  reset-refusal #9: a reset refuses to start without essentia_streaming_extractor_music.exe beside the test binary");
+                return;
+            }
+            var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "reset-refusal-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            bool keep = false;
+            try
+            {
+                var lib = Path.Combine(root, "Library");
+                var music = Path.Combine(root, "music");
+                var work = Path.Combine(root, "elsewhere");
+                Directory.CreateDirectory(lib); Directory.CreateDirectory(music);
+                var track = Path.Combine(music, "track.mp3");
+                string resource = typeof(Program).Assembly.GetManifestResourceNames().Single(n => n.EndsWith("stub.mp3", StringComparison.Ordinal));
+                using (var input = typeof(Program).Assembly.GetManifestResourceStream(resource)!)
+                using (var output = File.Create(track)) input.CopyTo(output);
+                var xml = Path.Combine(lib, "iTunes Music Library.xml");
+                File.WriteAllText(xml,
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>Tracks</key>\n\t<dict>\n"
+                    + "\t\t<key>1</key>\n\t\t<dict>\n\t\t\t<key>Track ID</key><integer>1</integer>\n\t\t\t<key>Name</key><string>track</string>\n"
+                    + "\t\t\t<key>Location</key><string>" + new Uri(track).AbsoluteUri + "</string>\n\t\t</dict>\n"
+                    + "\t</dict>\n</dict>\n</plist>\n");
+                var files = new Dictionary<string, string>
+                {
+                    [Path.Combine(lib, "mbxmoods.json")] = "{\"version\":1,\"trackCount\":0,\"tracks\":{}}",
+                    [Path.Combine(lib, "mbxmoods-errors.csv")] = "an error list an earlier build left beside the catalog",
+                    [Path.Combine(lib, "mbxmoods-skipped.csv")] = "a skip list beside the catalog",
+                };
+                foreach (var kv in files) File.WriteAllText(kv.Key, kv.Value);
+                foreach (var verb in new[] { "--reset", "--clear" })
+                {
+                    var output = RunChild(exe, lib, "--no-config " + Q(xml) + " --no-store " + verb + " --work-dir " + Q(work), out int exit);
+                    File.WriteAllText(Path.Combine(root, "refused" + verb + ".log"), output);
+                    var moved = files.Where(kv => !File.Exists(kv.Key) || File.ReadAllText(kv.Key) != kv.Value).Select(kv => Path.GetFileName(kv.Key)).ToList();
+                    bool ok = exit == 2 && moved.Count == 0 && !Directory.Exists(work);
+                    if (!ok) keep = true;
+                    assert(ok, $"reset-refusal #9: an unattended {verb} without --imeanit exits 2 and every file is where it was, no work folder made (exit {exit}{(moved.Count > 0 ? "; moved: " + string.Join(", ", moved) : "")}{(Directory.Exists(work) ? "; work folder made" : "")})");
+                }
+            }
+            catch (Exception ex) { keep = true; assert(false, "reset-refusal #9: threw " + ex.GetType().Name + ": " + ex.Message); }
+            finally { if (!keep) { try { Directory.Delete(root, true); } catch { } } }
         }
 
         /// <summary>Review #8: a restore given an archive beside the catalog, with a work folder elsewhere, moved its own input into the
@@ -623,6 +675,48 @@ namespace Truedat
                 assert(ledger.Count == 3 && loaded.Count == 3, "clear-ignore: picking the ignore records changes nothing in the list they came from");
             }
             catch (Exception ex) { assert(false, "clear-ignore: threw " + ex.GetType().Name + ": " + ex.Message); }
+            finally { try { Directory.Delete(root, true); } catch { } }
+        }
+
+        /// <summary>Review #18: --clear carries the ignore decisions of the review list it ARCHIVED, not of the copy it read before the
+        /// confirmation prompt. Here the two differ (as they do when the hub changes a decision while the prompt waits): the archived
+        /// list says ignore X, the earlier read said ignore Y; X is carried.</summary>
+        static void TestCarriedFromArchive(Action<bool, string> assert)
+        {
+            var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "clear-archived-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            try
+            {
+                Directory.CreateDirectory(root);
+                var t0 = new DateTime(2026, 11, 22, 0, 0, 0, DateTimeKind.Utc);
+                ReviewLedger Ledger(string ignored)
+                {
+                    var l = new ReviewLedger();
+                    l.Upsert(new ReviewRecord { Path = ignored, Disposition = ReviewDisposition.Failed, Reason = "r" }, t0, false);
+                    l.SetState(ignored, ReviewState.Ignore);
+                    l.Upsert(new ReviewRecord { Path = @"D:\Music\other.flac", Disposition = ReviewDisposition.Failed, Reason = "r" }, t0, false);
+                    return l;
+                }
+                var readBeforePrompt = Ledger(@"D:\Music\Y.flac");
+                var atArchiveTime = Path.Combine(root, ReviewLedger.FileName);
+                Program.SaveReviewLedger(Ledger(@"D:\Music\X.flac"), atArchiveTime, out _);
+                var zip = Path.Combine(root, "mbxmoods-clear-20261122-000000.zip");
+                CatalogArchive.WriteZipBackup(new[] { (atArchiveTime, "review/" + ReviewLedger.FileName) }, zip, requireWholeDocuments: false);
+
+                var carried = ResetCommand.CarriedFromArchive(ResetCommand.Verb.Clear, zip, "review/" + ReviewLedger.FileName, out var err);
+                assert(err == null && carried != null && carried.Count == 1 && carried.Find(@"D:\Music\X.flac")?.State == ReviewState.Ignore
+                       && carried.Find(@"D:\Music\Y.flac") == null && readBeforePrompt.Find(@"D:\Music\Y.flac") != null,
+                    $"clear-archived #18: the decisions carried are the archived list's (X), not the earlier read's (Y) ({carried?.Count ?? -1}, {err})");
+                assert(ResetCommand.CarriedFromArchive(ResetCommand.Verb.Reset, zip, "review/" + ReviewLedger.FileName, out _) == null,
+                    "clear-archived #18: --reset carries nothing");
+                assert(ResetCommand.CarriedFromArchive(ResetCommand.Verb.Clear, zip, "review/absent.json", out var none) == null && none == null,
+                    "clear-archived #18: an archive with no review list carries nothing and is not an error");
+                var bad = Path.Combine(root, "bad.json"); File.WriteAllText(bad, "{ not json");
+                var badZip = Path.Combine(root, "mbxmoods-clear-20261122-000001.zip");
+                CatalogArchive.WriteZipBackup(new[] { (bad, "review/" + ReviewLedger.FileName) }, badZip, requireWholeDocuments: false);
+                ResetCommand.CarriedFromArchive(ResetCommand.Verb.Clear, badZip, "review/" + ReviewLedger.FileName, out var badErr);
+                assert(badErr != null, "clear-archived #18: an archived list that cannot be read is an error, not an empty carry");
+            }
+            catch (Exception ex) { assert(false, "clear-archived #18: threw " + ex.GetType().Name + ": " + ex.Message); }
             finally { try { Directory.Delete(root, true); } catch { } }
         }
 

@@ -6113,12 +6113,15 @@ namespace Truedat
             }
             // The work folder: settled, and the working files already beside the catalog moved into it, before the reset collects
             // them and before the errors list is read. Said in the tool-check block below, where the --audit log sees it.
-            BeginWork(moodsPath);
+            // Not before a --clear / --reset (review #9): a refused one must move nothing, so the reset settles the folder itself once it
+            // is confirmed. A reset with nothing to archive returns before that, and the call below settles it then.
+            if (!StartOverRequested) BeginWork(moodsPath);
             // --clear / --reset: before the store is settled and before anything is loaded, so the scan below starts from nothing.
             if (StartOverRequested)
             {
                 int resetExit = RunReset(StartOverVerb, xmlPath, moodsPath, outputDir);
                 if (resetExit != 0) { Environment.ExitCode = resetExit; return; }
+                BeginWork(moodsPath);
             }
             // No store yet: the library scan makes one now that its catalog path is known, and then begins the run record
             // for it (BeginScan above ran with no store and recorded nothing). A --chunk shard never does.
@@ -26244,6 +26247,17 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// run without a store — so a library that had edges would need the whole pass again to get them back.</summary>
         static int RunReset(ResetCommand.Verb verb, string xmlPath, string moodsPath, string outputDir)
         {
+            // Review #9: everything before the confirmation is an INVENTORY, taken without side effects — a refused reset changes nothing,
+            // and the work folder's move is a change. The first-use hook is off for the whole step, and the work folder is settled
+            // explicitly once the confirmation and every preflight check have passed (and by the scan after it otherwise).
+            var hook = WorkFolder.BeginOnFirstUse;
+            WorkFolder.BeginOnFirstUse = null;
+            try { return RunResetSteps(verb, xmlPath, moodsPath, outputDir); }
+            finally { WorkFolder.BeginOnFirstUse = hook; }
+        }
+
+        static int RunResetSteps(ResetCommand.Verb verb, string xmlPath, string moodsPath, string outputDir)
+        {
             bool clear = verb == ResetCommand.Verb.Clear;
             string verbFlag = "--" + ResetCommand.FlagOf(verb);
             Console.WriteLine(clear ? "=== Clear ===" : "=== Reset ===");
@@ -26349,7 +26363,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Console.WriteLine();
                 return 0;
             }
-            string archive = ResetCommand.ArchivePathFor(verb, moodsPath, DateTime.Now);
+            var archiveTime = DateTime.Now;
+            string archive = ResetCommand.ArchivePathPreview(verb, moodsPath, archiveTime);   // nothing created before the confirmation (#9)
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             string Mb(long b) => b >= 1024 * 1024 ? (b / (1024.0 * 1024.0)).ToString("F1", inv) + " MB" : b.ToString("N0", inv) + " B";
             long totalBytes = 0;
@@ -26383,7 +26398,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             {
                 // Said last, in its own line before the prompt: a --reset typed out of habit from a build where it kept the rules
                 // must not be able to miss that it no longer does.
-                var operatorFiles = files.Where(f => f.EntryName.IndexOf('/') < 0 && ResetCommand.IsOperatorFile(f.EntryName)).Select(f => f.Path).ToList();
+                // Beside the library, and the exclusion playlist in its Playlists folder (review #10): every rule file the reset takes.
+                var operatorFiles = files.Where(f => (f.EntryName.IndexOf('/') < 0 && ResetCommand.IsOperatorFile(f.EntryName)) || ResetCommand.IsPlaylistsEntry(f.EntryName))
+                                         .Select(f => f.Path).ToList();
                 Console.WriteLine();
                 Console.WriteLine("  This is a full reset: it also removes your exclusion rules and duplicate verdicts (and the ignore decisions); --clear is the one that keeps them.");
                 if (operatorFiles.Count > 0)
@@ -26420,6 +26437,14 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     return 2;
             }
 
+            // Confirmed, and every check above passed: NOW the work folder is settled and the working files beside the catalog move
+            // into it (review #9). The file set is taken again, since what moved is now under work/, and the archive goes to the folder
+            // actually settled (the catalog folder after a fallback) under the name it was announced with.
+            BeginWork(moodsPath);
+            ShowWork(Console.Out);
+            files = ResetCommand.Collect(verb, moodsPath, store, ledgerPath);
+            archive = ResetCommand.ArchivePathFor(verb, moodsPath, archiveTime);
+
             // The store's main file must be the whole store before it is archived: --restore takes that file out of the zip,
             // so changes still in the write-ahead log (a scan that was killed) would be archived and yet not restored.
             if (store != null && ResetCommand.FoldStoreLog(store))
@@ -26442,7 +26467,21 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Console.Error.WriteLine("  Remove them and run a scan; the archive already holds them.");
                 return 1;
             }
-            // 9. --clear: the ignore decisions go back, in a list of the same kind written by the writer every scan uses.
+            // 9. --clear: the ignore decisions go back, in a list of the same kind written by the writer every scan uses — taken from
+            //    the list that was ARCHIVED (review #18), not the copy read before the prompt: a decision the hub changed while the
+            //    prompt waited is the one carried, and the new list cannot disagree with the archive it came from.
+            if (clear)
+            {
+                var archivedLedger = files.FirstOrDefault(f => string.Equals(Path.GetFullPath(f.Path), Path.GetFullPath(ledgerPath), StringComparison.OrdinalIgnoreCase)).EntryName;
+                string? carriedErr = null;
+                carried = archivedLedger == null ? null : ResetCommand.CarriedFromArchive(verb, archive, archivedLedger, out carriedErr);
+                if (archivedLedger != null && carried == null && carriedErr != null)
+                {
+                    Console.Error.WriteLine($"Error: the review list was archived, and its ignore decisions could not be read back out of {archive} ({carriedErr}), so the scan did not start.");
+                    Console.Error.WriteLine($"  They are in the archive as {archivedLedger}; everything else is archived and removed.");
+                    return 1;
+                }
+            }
             if (carried != null)
             {
                 if (!SaveReviewLedger(carried, ledgerPath, out var saveErr))
