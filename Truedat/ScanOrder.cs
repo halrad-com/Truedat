@@ -153,4 +153,50 @@ namespace Truedat
                 yield return new KeyValuePair<T, bool>(item, longLane);
         }
     }
+    /// <summary>Review #17: the same audio is analyzed once per run, in every scan mode. The first worker to reach an audio hash that
+    /// is not in the catalog claims it and analyzes it; a worker that reaches the same hash meanwhile waits for that analysis and
+    /// reuses it, and one that reaches it later reuses the published result. A claimant that ends without a usable result releases
+    /// the hash, and the next one to ask analyzes it itself - a failure is never inherited.</summary>
+    internal sealed class SameAudio<T> where T : class
+    {
+        sealed class Slot
+        {
+            internal readonly System.Threading.ManualResetEventSlim Done = new System.Threading.ManualResetEventSlim(false);
+            internal T? Result;
+            internal string? Key;
+        }
+        readonly System.Collections.Concurrent.ConcurrentDictionary<string, Slot> _slots =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, Slot>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>True: this caller claimed <paramref name="audioHash"/> and must analyze it, then call <see cref="Publish"/>.
+        /// False: another worker analyzed it; <paramref name="result"/> and <paramref name="key"/> are its entry and path. Waits
+        /// while another worker is analyzing it. A null or empty hash is always the caller's own.</summary>
+        internal bool ClaimOrWait(string? audioHash, System.Threading.CancellationToken ct, out T? result, out string? key)
+        {
+            result = null; key = null;
+            if (string.IsNullOrEmpty(audioHash)) return true;
+            while (true)
+            {
+                var mine = new Slot();
+                var slot = _slots.GetOrAdd(audioHash!, mine);
+                if (ReferenceEquals(slot, mine)) return true;          // claimed: this caller analyzes it
+                slot.Done.Wait(ct);                                    // another worker is analyzing it, or has
+                if (slot.Result != null) { result = slot.Result; key = slot.Key; return false; }
+                // It ended without a usable result: its slot is released (Publish removed it), so the next pass claims it.
+                ((System.Collections.Generic.ICollection<System.Collections.Generic.KeyValuePair<string, Slot>>)_slots)
+                    .Remove(new System.Collections.Generic.KeyValuePair<string, Slot>(audioHash!, slot));
+            }
+        }
+
+        /// <summary>The claimant's outcome: its entry when the analysis is usable, else null (the hash is released).</summary>
+        internal void Publish(string? audioHash, T? result, string key)
+        {
+            if (string.IsNullOrEmpty(audioHash) || !_slots.TryGetValue(audioHash!, out var slot)) return;
+            slot.Result = result; slot.Key = key;
+            if (result == null)
+                ((System.Collections.Generic.ICollection<System.Collections.Generic.KeyValuePair<string, Slot>>)_slots)
+                    .Remove(new System.Collections.Generic.KeyValuePair<string, Slot>(audioHash!, slot));
+            slot.Done.Set();
+        }
+    }
 }

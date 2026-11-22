@@ -5368,6 +5368,8 @@ namespace Truedat
                     BuildHashIndex(flMoodsTracks, e => e.AudioStreamSha256);
                 if (flMoodsTracks.Count > 0)
                     Console.Error.WriteLine($"  Loaded {flMoodsTracks.Count} existing entries (sha={flMoodShaIndex?.Count ?? 0})");
+                // Review #17: audio analyzed in this run, by hash - so two new copies of one audio in a list or folder are analyzed once.
+                var flSameAudio = new SameAudio<TrackEntry>();
 
                 // Source-loss latch for the per-file modes. This is the autoscan path (the
                 // MBXHub plugin pipes new paths to --file-list -), so it runs unattended and a
@@ -5403,6 +5405,7 @@ namespace Truedat
                 // cache hits catch up fast while the slow analyses spread evenly across threads.
                 Action<string> processFile = filePath =>
                 {
+                    string? flClaimedSha = null;   // review #17: set when this file claimed its audio; published in the finally
                     if (Volatile.Read(ref flSourceLost) != 0) return;
                     // T18 (TDA 120 / keeper 132): no new file starts once checkpoints have failed persistently.
                     if (flPeriodicSave.PersistentFailure != null) { Interlocked.Increment(ref flNotStartedAfterCheckpointFailure); return; }
@@ -5631,16 +5634,23 @@ namespace Truedat
                                 }
                             }
 
-                            // Tier 4: cross-SHA hit (file moved AND tag-edited)
-                            if (flMoodShaIndex != null)
+                            // Tier 4: cross-SHA hit (file moved AND tag-edited), or the same audio analyzed earlier in this run (review #17).
+                            // Only with a catalog to write: without --moods nothing is kept, so there is nothing to reuse.
+                            if (flMoodShaIndex != null || !string.IsNullOrEmpty(analyzeFileMoods))
                             {
                                 var flStagedPath = EnsureStagedSrc();
                                 var flXHashes = EnsureBodyHashes();
                                 var localSha = flXHashes.sha;
                                 (TrackEntry Entry, string OldKey) xs = default;
-                                bool flXHit = !string.IsNullOrEmpty(localSha) && flMoodShaIndex.TryGetValue(localSha!, out xs);
-                                bool flXLegacyHit = !flXHit && !string.IsNullOrEmpty(flXHashes.leg)
+                                bool flXHit = !string.IsNullOrEmpty(localSha) && flMoodShaIndex != null && flMoodShaIndex.TryGetValue(localSha!, out xs);
+                                bool flXLegacyHit = !flXHit && !string.IsNullOrEmpty(flXHashes.leg) && flMoodShaIndex != null
                                     && flMoodShaIndex.TryGetValue(flXHashes.leg!, out xs);
+                                if (!((flXHit || flXLegacyHit) && xs.Entry != null && HasCurrentEntry(xs.Entry))
+                                    && !string.IsNullOrEmpty(localSha) && !string.IsNullOrEmpty(analyzeFileMoods))
+                                {
+                                    if (flSameAudio.ClaimOrWait(localSha, CancellationToken.None, out var sameEntry, out var sameKey)) flClaimedSha = localSha;
+                                    else { xs = (sameEntry!, sameKey!); flXHit = true; flXLegacyHit = false; }
+                                }
                                 if ((flXHit || flXLegacyHit)
                                     && xs.Entry != null && HasCurrentEntry(xs.Entry))
                                 {
@@ -5787,6 +5797,8 @@ namespace Truedat
                             if (_storePath != null) RecordPerFileScanEntry(flKey, trackEntry, flStagedSrc?.Path);   // S2 C3/C-A
                             ClearReviewRecord(filePath);
                             NoteFreshAnalysis(flKey);
+                            NoteFreshContent(audioStreamSha256);
+                            if (flStagedSrc != null && global::Truedat.Store.ScanSink.HasUsableFold(flStagedSrc.Path)) NoteFreshEdges(audioStreamSha256);   // review #20
                         }
 
                         Interlocked.Increment(ref flProcessed); global::Truedat.Store.StoreResult.List?.Analyzed();
@@ -5805,7 +5817,18 @@ namespace Truedat
                         RecordReviewFailure(filePath, ex.Message, 0, 0, "exception", "file-list");
                         Console.Error.WriteLine($"[FAIL] {Path.GetFileName(filePath)}: {ex.Message}");
                     }
-                    finally { flStagedSrc?.Dispose(); KeepAwakePump(workMode: true); }
+                    finally
+                    {
+                        // Review #17: what this file's analysis made, for a copy of its audio met later or waiting now.
+                        if (flClaimedSha != null)
+                        {
+                            string flPublishKey = Path.GetFullPath(filePath);
+                            flSameAudio.Publish(flClaimedSha,
+                                _measuredThisRun.ContainsKey(flPublishKey) && flMoodsTracks.TryGetValue(flPublishKey, out var flPublished) && HasCurrentEntry(flPublished)
+                                    ? flPublished : null, flPublishKey);
+                        }
+                        flStagedSrc?.Dispose(); KeepAwakePump(workMode: true);
+                    }
                 };
 
                 // Perf-hint split (no file IO): a path already in the loaded catalog with
@@ -6402,6 +6425,8 @@ namespace Truedat
             // across tag edits. Catches "audio bytes unchanged but tags/path drifted",
             // including clean moves and cross-machine matching.
             Dictionary<string, (TrackEntry Entry, string OldKey)>? moodShaIndex = BuildHashIndex(allTracks, e => e.AudioStreamSha256);
+            // Review #17: audio analyzed in this run, by hash - one analysis per audio, a copy met later reuses it, one met meanwhile waits.
+            var sameAudio = new SameAudio<TrackEntry>();
             if (moodShaIndex != null)
                 Console.WriteLine($"  SHA index:  {moodShaIndex.Count} entries available for tag-edit / cross-machine matching");
 
@@ -6676,6 +6701,7 @@ namespace Truedat
                     // finally below. Default "failed" covers exception paths.
                     var trackSw = Stopwatch.StartNew();
                     var trackClass = "failed";
+                    string? msClaimedSha = null;   // review #17: set when this track claimed its audio; published in the finally
                     // "Known" for ETA purposes = present AND feature-complete; a
                     // refresh-stale entry analyzes, so it lives in the new-work pool.
                     bool wasKnown = allTracks.TryGetValue(t.Location, out var wkEntry) && HasCurrentEntry(wkEntry);
@@ -7061,7 +7087,8 @@ namespace Truedat
                         // Cross-machine SHA fallback \u2014 same audio bytes (invariant region)
                         // at a different path. Catches clean moves and "moved + tag-edited"
                         // alike. Body read goes through the staged copy (FIX 4).
-                        if (moodShaIndex != null)
+                        // Every track to be analyzed is hashed here, catalog or not: the hash is what lets a copy met later in this run
+                        // reuse its analysis (review #17). The analysis reads the same memoised hashes, so nothing is read twice.
                         {
                             if (msSourceSize == 0)
                                 try { msSourceSize = new FileInfo(scanPath).Length; } catch { }
@@ -7073,9 +7100,15 @@ namespace Truedat
                                 // Index holds STORED values — for un-migrated FLAC entries that's
                                 // the legacy TagLib-region sha, so look up both forms.
                                 (TrackEntry Entry, string OldKey) xs = default;
-                                bool crossHit = !string.IsNullOrEmpty(localSha) && moodShaIndex.TryGetValue(localSha!, out xs);
-                                bool crossLegacyHit = !crossHit && !string.IsNullOrEmpty(crossHashes.leg)
+                                bool crossHit = !string.IsNullOrEmpty(localSha) && moodShaIndex != null && moodShaIndex.TryGetValue(localSha!, out xs);
+                                bool crossLegacyHit = !crossHit && !string.IsNullOrEmpty(crossHashes.leg) && moodShaIndex != null
                                     && moodShaIndex.TryGetValue(crossHashes.leg!, out xs);
+                                // No current entry for this audio in the catalog: one analyzed in this run, or about to be, is just as good.
+                                if (!((crossHit || crossLegacyHit) && HasCurrentEntry(xs.Entry)) && !string.IsNullOrEmpty(localSha))
+                                {
+                                    if (sameAudio.ClaimOrWait(localSha, CancellationToken.None, out var sameEntry, out var sameKey)) msClaimedSha = localSha;
+                                    else { xs = (sameEntry!, sameKey!); crossHit = true; crossLegacyHit = false; }
+                                }
                                 if (crossHit || crossLegacyHit)
                                 {
                                     var xsf = xs.Entry!.Features;
@@ -7331,6 +7364,12 @@ namespace Truedat
                     finally
                     {
                         Interlocked.Decrement(ref _inFlight);   // paired with the increment past the pause gate
+                        // Review #17: what this track's analysis made, for a copy of its audio met later or waiting now; nothing usable
+                        // (a failure, a stop, edges not written under --refresh) releases the audio for the next copy to analyze.
+                        if (msClaimedSha != null)
+                            sameAudio.Publish(msClaimedSha,
+                                _measuredThisRun.ContainsKey(t.Location) && allTracks.TryGetValue(t.Location, out var msPublished) && HasCurrentEntry(msPublished)
+                                    ? msPublished : null, t.Location);
                         Interlocked.Add(ref _processedAudioMsTotal, t.TotalTimeMs);   // duration-progress numerator
                         msStagedSrc?.Dispose();
                         RecordTrackOutcome(trackClass, trackSw.ElapsedTicks);
@@ -7375,32 +7414,26 @@ namespace Truedat
                     // Two passes, so the same audio is not analyzed twice: a track the same exact length as one before it waits
                     // until the first pass is done, then is checked against what that pass analyzed (ScanOrder).
                     ScanOrder.SplitRepeatedLengths(msLikelyWork, t => t.TotalTimeMs, out var firstPass, out var secondPass);
-                    bool announced = false;
-                    void RunPass(List<ITunesTrack> pass)
+                    // One feed, no barrier between the passes (review #17): the second pass's tracks follow the first's at once, and a
+                    // copy whose audio is still being analyzed waits for that analysis (SameAudio) instead of every worker waiting
+                    // for the slowest first-pass track.
+                    var firstOrder = new LongFirstQueue<ITunesTrack>(firstPass, t => t.TotalTimeMs / 1000.0, parallelism, orderBudget);
+                    var secondOrder = secondPass.Count > 0 ? new LongFirstQueue<ITunesTrack>(secondPass, t => t.TotalTimeMs / 1000.0, parallelism, orderBudget) : null;
+                    int lanes = Math.Max(firstOrder.LongCount > 0 ? firstOrder.Lanes : 0, secondOrder != null && secondOrder.LongCount > 0 ? secondOrder.Lanes : 0);
+                    if (lanes > 0)
+                        Console.WriteLine($"  Order:      long tracks are taken first, {lanes} at a time; the rest in library order");
+                    IEnumerable<(ITunesTrack Track, LongFirstQueue<ITunesTrack> Queue, bool LongLane)> WorkFeed()
                     {
-                        if (pass.Count == 0) return;
-                        var workOrder = new LongFirstQueue<ITunesTrack>(pass, t => t.TotalTimeMs / 1000.0, parallelism, orderBudget);
-                        if (workOrder.LongCount > 0 && !announced)
+                        foreach (var kv in firstOrder.Feed()) yield return (kv.Key, firstOrder, kv.Value);
+                        if (secondOrder != null) foreach (var kv in secondOrder.Feed()) yield return (kv.Key, secondOrder, kv.Value);
+                    }
+                    Parallel.ForEach(
+                        Partitioner.Create(WorkFeed(), EnumerablePartitionerOptions.NoBuffering),
+                        msOptions, pick =>
                         {
-                            announced = true;
-                            Console.WriteLine($"  Order:      long tracks are taken first, {workOrder.Lanes} at a time; the rest in library order");
-                        }
-                        Parallel.ForEach(
-                            Partitioner.Create(workOrder.Feed(), EnumerablePartitionerOptions.NoBuffering),
-                            msOptions, pick =>
-                            {
-                                try { processTrack(pick.Key); }
-                                finally { workOrder.Done(pick.Value); }
-                            });
-                    }
-                    RunPass(firstPass);
-                    if (secondPass.Count > 0)
-                    {
-                        // What the first pass analyzed is what the second may reuse. Only entries that are current: an older entry
-                        // for the same audio would be found first and send the track to be analyzed again.
-                        moodShaIndex = BuildHashIndex(allTracks, e => HasCurrentEntry(e) ? e.AudioStreamSha256 : null);
-                        RunPass(secondPass);
-                    }
+                            try { processTrack(pick.Track); }
+                            finally { pick.Queue.Done(pick.LongLane); }
+                        });
                 }
             }
             catch (OperationCanceledException) { }

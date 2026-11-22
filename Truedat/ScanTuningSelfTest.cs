@@ -17,7 +17,54 @@ namespace Truedat
             Order(assert);
             Repeats(assert);
             OtherCopy(assert);
+            SameAudioOnce(assert);
         }
+        /// <summary>Review #17: two copies of one audio in a run are analyzed once, whichever order and timing they arrive in.</summary>
+        static void SameAudioOnce(Action<bool, string> assert)
+        {
+            var none = System.Threading.CancellationToken.None;
+            // In sequence: the first claims, publishes; the second reuses.
+            var r1 = new SameAudio<string>();
+            assert(r1.ClaimOrWait("aa", none, out _, out _), "same audio: the first copy of an audio claims it");
+            r1.Publish("aa", "entry-A", @"C:\lib\a.flac");
+            bool claimed2 = r1.ClaimOrWait("AA", none, out var got, out var gotKey);
+            assert(!claimed2 && got == "entry-A" && gotKey == @"C:\lib\a.flac",
+                $"same audio: a later copy reuses the published analysis, the hash matched without regard to case ({claimed2}, {got}, {gotKey})");
+            assert(r1.ClaimOrWait("bb", none, out _, out _), "same audio: different audio is its own");
+            assert(r1.ClaimOrWait(null, none, out _, out _) && r1.ClaimOrWait("", none, out _, out _), "same audio: a track with no hash is always analyzed");
+
+            // At the same time: the second waits for the first, then reuses it.
+            var r2 = new SameAudio<string>();
+            assert(r2.ClaimOrWait("cc", none, out _, out _), "same audio: claimant");
+            string? waited = null; bool waiterClaimed = true;
+            var waiter = new System.Threading.Thread(() => waiterClaimed = r2.ClaimOrWait("cc", none, out waited, out _));
+            waiter.Start();
+            bool finishedEarly = waiter.Join(300);
+            r2.Publish("cc", "entry-C", @"C:\lib\c.flac");
+            waiter.Join(5000);
+            assert(!finishedEarly, "same audio: a copy that arrives while its audio is being analyzed waits for that analysis");
+            assert(!waiterClaimed && waited == "entry-C", $"same audio: and then reuses it ({waiterClaimed}, {waited})");
+
+            // A claimant that fails: the next copy analyzes it itself, and its result is the one published.
+            var r3 = new SameAudio<string>();
+            assert(r3.ClaimOrWait("dd", none, out _, out _), "same audio: claimant that will fail");
+            r3.Publish("dd", null, @"C:\lib\d1.flac");
+            assert(r3.ClaimOrWait("dd", none, out _, out _), "same audio: after a failed analysis the next copy is analyzed, not given the failure");
+            r3.Publish("dd", "entry-D2", @"C:\lib\d2.flac");
+            assert(!r3.ClaimOrWait("dd", none, out var d, out _) && d == "entry-D2", "same audio: and the copy after that reuses the good one");
+
+            // A waiter on a claimant that fails becomes the analyst.
+            var r4 = new SameAudio<string>();
+            r4.ClaimOrWait("ee", none, out _, out _);
+            bool waiter4Claimed = false;
+            var waiter4 = new System.Threading.Thread(() => waiter4Claimed = r4.ClaimOrWait("ee", none, out _, out _));
+            waiter4.Start();
+            System.Threading.Thread.Sleep(100);
+            r4.Publish("ee", null, @"C:\lib\e.flac");
+            waiter4.Join(5000);
+            assert(waiter4Claimed, "same audio: a copy waiting on an analysis that failed analyzes the audio itself");
+        }
+
         /// <summary>Review #5. When a track's audio is already in the catalog under another path, the acoustic features are reused
         /// and everything that belongs to the copy comes from the copy: its own text, its own SMFM block, its own place in the
         /// library. The donor's are another file's.</summary>
@@ -169,6 +216,15 @@ namespace Truedat
             for (int i = 0; i < 20; i++) twelveUnknown.Reserve(12 * 60, Cd);
             assert(twelveUnknown.ReservedBytes <= twelveUnknown.TotalBytes,
                 $"spool budget: 20 workers on 12-minute tracks in 8 GiB stay inside the budget when the run knows no typical length ({twelveUnknown.ReservedBytes:N0} of {twelveUnknown.TotalBytes:N0})");
+            // The budget is an estimate, not a hard bound: an extractor's own memory is spent whatever is granted, and the lengths of
+            // tracks not yet started are unknown. Shorter tracks first, then longer ones (codex, after 7817215): the early grants fit,
+            // the later extractors are bigger than any estimate made then. Pinned so a change cannot widen the overrun silently.
+            var mixedOrder = new SpoolBudget(8 * GiB, workers: 20);
+            for (int i = 0; i < 16; i++) mixedOrder.Reserve(6 * 60, Cd);
+            for (int i = 0; i < 4; i++) mixedOrder.Reserve(12 * 60, Cd);
+            double overrun = (double)(mixedOrder.ReservedBytes - mixedOrder.TotalBytes) / mixedOrder.TotalBytes;
+            assert(overrun <= 0.01,
+                $"spool budget: short tracks then long ones go over the share by at most 1% of it - inside the 40% of free RAM kept back ({overrun:P2})");
             var twelve = new SpoolBudget(8 * GiB, workers: 20, typicalSeconds: 12 * 60);   // a library of 12-minute tracks
             for (int i = 0; i < 20; i++) twelve.Reserve(12 * 60, Cd);
             assert(twelve.ReservedBytes <= twelve.TotalBytes,
