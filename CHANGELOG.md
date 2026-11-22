@@ -23,8 +23,8 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 - The same audio at two paths is analyzed once. A track the same length as an earlier one waits for a second pass and reuses the earlier analysis when the audio is identical.
 - The scan summary says how many tracks were held in memory, and how many reused an identical track's analysis.
 - Truedat's working files (the error and skipped lists, scan summaries, logs, backups and archives) are written to the folder with the exe instead of the catalog folder. Files already beside the catalog are moved on the first scan. The catalog, sidecar, edges file, store and your rules stay where they are. `--work-dir` names another folder.
-- `--clear` starts a library's analysis over and keeps what is yours: it archives and removes truedat's analysis data (the catalog, sidecar, edges file, store, and the error and skipped lists) and keeps your exclusion rules and duplicate verdicts.
-- `--reset` is now a full reset: it does what `--clear` does and also archives and removes your exclusion rules and duplicate verdicts. Before this it kept the exclusion rules.
+- `--clear` starts a library's analysis over and keeps how it is set up: it archives and removes truedat's analysis data (the catalog, sidecar, edges file, store, and the error and skipped lists), then scans from nothing. It keeps your settings, exclusion rules, duplicate verdicts and the files you marked ignore. It asks you to type `CLEAR`.
+- `--reset` is now a full reset: it does what `--clear` does and also archives and removes your exclusion rules, duplicate verdicts and ignore decisions. Before this it kept the exclusion rules. `--restore` of its archive puts them back.
 
 ### Fixed
 
