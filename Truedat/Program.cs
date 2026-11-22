@@ -22959,6 +22959,9 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 }
                 Assert(ResampleFallbackLine(0) == null && ResampleFallbackLine(2) == "  Resampled:  2 file(s) could not be converted; analyzed at the source rate (--audit logs each)",
                     $"resample fallback: silent when none, one counted line when some ({ResampleFallbackLine(2)})");
+                Assert(!ResampleCountsAsFallback(SubprocessWait.Outcome.Cancelled)
+                       && ResampleCountsAsFallback(SubprocessWait.Outcome.Stalled) && ResampleCountsAsFallback(SubprocessWait.Outcome.Overran),
+                    "resample fallback: a conversion stopped by Ctrl+C is not counted as one that could not be converted; a stall or an overrun is");
                 {
                     // LogNote is for the log only: with no --audit tee installed it writes nowhere, and never to the console.
                     var prevOut = Console.Out; var prevErr = Console.Error;
@@ -29056,6 +29059,10 @@ setMode(mode);  // sync the pivot toggle UI + initial render
         /// do") — the track is analyzed either way, so the reason goes to the log and the run reports the COUNT.</summary>
         static int _preResampleFellBackCount;
 
+        /// <summary>Whether a conversion that did not finish counts as one that "could not be converted". A stop (Ctrl+C, the console
+        /// closed) is not a failure of the file: the run was asked to end, so it is not counted.</summary>
+        internal static bool ResampleCountsAsFallback(SubprocessWait.Outcome waited) => waited != SubprocessWait.Outcome.Cancelled;
+
         // The per-rate split ("By rate:" in the summary). The extractor's CPU and the conversion's time are read on the worker
         // thread that made them — AnalyzeWithEssentia and the calls under it are synchronous on one worker — and recorded once per
         // track against the SOURCE rate, for the track's first extractor run only: a downmix or transcode retry would put a
@@ -29156,7 +29163,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 if (waited != SubprocessWait.Outcome.Exited)
                 {
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    Interlocked.Increment(ref _preResampleFellBackCount);
+                    if (ResampleCountsAsFallback(waited)) Interlocked.Increment(ref _preResampleFellBackCount);
                     if (waited == SubprocessWait.Outcome.Stalled)
                         LogNote($"  NOTE: resample to 44.1 kHz stalled (no progress for {EssentiaPollSeconds * EssentiaStallIdlePolls} s, after {sw.Elapsed.TotalSeconds:F0} s); analyzing the original  [{shown}]");
                     else if (waited == SubprocessWait.Outcome.Overran)
