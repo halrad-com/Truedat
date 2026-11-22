@@ -373,6 +373,22 @@ namespace Truedat.Store
                 File.WriteAllText(first, "{\"kind\":\"store-result\",\"schemaVersion\":1,\"verb\":\"scan\",\"outcome\":\"completed\",\"exitCode\":0,\"startedUtc\":\"2026-01-01T00:00:00.0000000Z\"}");
                 StoreResult.BeginScan(real.P("truedat.db"), started);
                 assert(File.Exists(first), "record follows the store: a record that is not this scan's provisional one is left alone");
+
+                // Review #21: another scan finishes its record at that place in the moment between this scan deciding the record is
+                // its own and removing it. The other scan's record must survive.
+                StoreResult.ResetScanForTest();
+                File.Delete(first);
+                StoreResult.BeginScan(guess.P("truedat.db"), started);
+                StoreResult.BeforeProvisionalRemovedForTest = () => File.WriteAllText(first, "{\"kind\":\"store-result\",\"schemaVersion\":1,\"verb\":\"scan\",\"outcome\":\"completed\",\"exitCode\":0,\"startedUtc\":\"2026-01-01T00:00:00.0000000Z\"}");
+                try { StoreResult.BeginScan(real.P("truedat.db"), started); }
+                finally { StoreResult.BeforeProvisionalRemovedForTest = null; }
+                assert(File.Exists(first) && File.ReadAllText(first).Contains("\"completed\""),
+                    "record follows the store: a record another scan writes at that place while this one removes its own is never deleted (review #21)");
+                // ("name.*" also matches "name" itself in a Windows file search, so the record is taken out by name.)
+                var leftBeside = Array.FindAll(System.IO.Directory.GetFiles(Path.GetDirectoryName(first)!, Path.GetFileName(first) + ".*"),
+                    f => !string.Equals(f, first, StringComparison.OrdinalIgnoreCase));
+                assert(leftBeside.Length == 0,
+                    $"record follows the store: and nothing is left beside it ({string.Join(", ", Array.ConvertAll(leftBeside, Path.GetFileName))})");
             }
         }
 

@@ -259,16 +259,37 @@ namespace Truedat.Store
 
         /// <summary>Removes the record at <paramref name="recordPath"/> only when it is still the provisional record this scan wrote
         /// there: same start, still "has not reported its outcome yet". A record any run finished is never removed here.</summary>
+        /// <summary>Self-test seam: runs after a provisional record has been judged this scan's own and before it is removed.</summary>
+        internal static Action? BeforeProvisionalRemovedForTest;
+
         static void RemoveOwnProvisional(string recordPath, string? startedUtc)
         {
+            // Review #21: reading the record and then deleting the path were two steps, and another scan could finish its own record
+            // at that place in between - the delete then removed THAT one. The record is moved aside under a name of this scan's own
+            // first (one atomic rename): from then on nothing another scan writes at the path can be touched, and what was moved is
+            // what gets judged. Not ours after all: put back, unless a newer record has been written there since.
+            string aside = recordPath + "." + Guid.NewGuid().ToString("N") + ".removing";
             try
             {
-                if (!TryRead(recordPath, out var r)) return;
-                if (r.Verb != "scan" || r.Outcome != OutcomeInterrupted || r.Reason != ProvisionalReason || r.StartedUtc != startedUtc) return;
-                File.Delete(recordPath);
-                StoreLog.Debug($"removed the provisional run record at {recordPath}: the scan settled on a store elsewhere");
+                if (!File.Exists(recordPath)) return;
+                try { File.Move(recordPath, aside); } catch (FileNotFoundException) { return; }
+                BeforeProvisionalRemovedForTest?.Invoke();
+                bool ours = TryRead(aside, out var r)
+                    && r.Verb == "scan" && r.Outcome == OutcomeInterrupted && r.Reason == ProvisionalReason && r.StartedUtc == startedUtc;
+                if (ours)
+                {
+                    File.Delete(aside);
+                    StoreLog.Debug($"removed the provisional run record at {recordPath}: the scan settled on a store elsewhere");
+                    return;
+                }
+                try { File.Move(aside, recordPath); }
+                catch (IOException) { File.Delete(aside); }   // a newer record is at the path now; the one moved aside is older
             }
-            catch (Exception ex) { StoreLog.Debug($"could not remove the provisional run record at {recordPath}: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                StoreLog.Debug($"could not remove the provisional run record at {recordPath}: {ex.Message}");
+                try { if (File.Exists(aside) && !File.Exists(recordPath)) File.Move(aside, recordPath); } catch { }
+            }
         }
 
         /// <summary>The scan decided something about its own outcome (source lost → interrupted; Ctrl+C → interrupted;
