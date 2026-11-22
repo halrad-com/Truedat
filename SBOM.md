@@ -5,7 +5,7 @@
 | Field        | Value                                                                                                                                                                                                         |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Name         | Truedat (Music Mood Extractor & Fingerprinter)                                                                                                                                                                |
-| Version      | 1.0.0 (assembly); release v0.5.5.4-EV6 — `truedat --version` prints both, e.g. `1.0.0.0-v0.5.5.4-EV6`                                                                                                                          |
+| Version      | 1.0.0 (assembly); release v0.5.5.4-EV6.2 — `truedat --version` prints both, e.g. `1.0.0.0-v0.5.5.4-EV6.2`                                                                                                                          |
 | License      | MIT                                                                                                                                                                                                           |
 | Framework    | .NET Framework 4.8                                                                                                                                                                                            |
 | Output       | `truedat.exe` (single file, ILRepack merged)                                                                                                                                                                  |
@@ -68,7 +68,7 @@ Source: [Essentia](https://essentia.upf.edu/) by Music Technology Group, Univers
 
 | File                                     | Architecture | Build          | Source                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ---------------------------------------- | ------------ | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `essentia_streaming_extractor_music.exe` | x64          | `output-x64.7` | Built from `essentia-build/` — mood analysis. `.5` added the binary frame-level output (`--frames-bin`, `framesInclude`) that `--edges` folds, and a build id in the output. `.6` fixed the decoder (large-block FLAC crashed, and APE, WMA Lossless and WMA Pro were cut short) and added the scan profile, which computes only the statistics truedat reads. `.7` decodes each track once into RAM and replays it to the later passes (capped per track; truedat sets the cap from the RAM available and the worker count), computes the chords and tuning HPCP in one pass, and no longer holds the whole track for danceability and dynamic complexity; its output is identical to `.6` apart from the build id. The 2/3-argument invocations are unchanged |
+| `essentia_streaming_extractor_music.exe` | x64          | `output-x64.8` | Built from `essentia-build/` — mood analysis. `.5` added the binary frame-level output (`--frames-bin`, `framesInclude`) that `--edges` folds, and a build id in the output. `.6` fixed the decoder (large-block FLAC crashed, and APE, WMA Lossless and WMA Pro were cut short) and added the scan profile, which computes only the statistics truedat reads. `.7` decodes each track once into RAM and replays it to the later passes (capped per track; truedat sets the cap from the RAM available and the worker count), computes the chords and tuning HPCP in one pass, and no longer holds the whole track for danceability and dynamic complexity; its output is identical to `.6` apart from the build id. `.8` is the `.7` source and compiler flags built profile-guided with link-time optimization: the same output, about 2% less extractor time. The 2/3-argument invocations are unchanged |
 
 The running build is identified by MD5 and named in `truedat --version` / the scan's tool check
 (`KnownExtractors` in `Truedat/Program.cs`); `--edges` refuses an older one rather than silently
@@ -76,7 +76,7 @@ skipping the fold.
 
 | File                                                      | MD5                                | SHA-256                                                            |
 | --------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------ |
-| `essentia_streaming_extractor_music.exe` (`output-x64.7`) | `0fb6f804f8f53dad65c4c963e6447e47` | `f0a9741606f5ce47e6d10fc16d33fd65ce48df7c2221325f0bbb0747e02d5cf9` |
+| `essentia_streaming_extractor_music.exe` (`output-x64.8`) | `192f3cfa530f2f58f04dc2668f4d9643` | `902159370d4d6e85f850ae94b2d735e15820af517d587e212225248ceb57d837` |
 
 Place it in the same folder as `truedat.exe`.
 
@@ -100,13 +100,18 @@ Source: [FFmpeg](https://ffmpeg.org/)
 
 Verified equal: the copies in `dist/truedat/` hash to the same values, so the shipped files are
 the recorded ones. (The extractor on that branch is **not** current — it is MD5
-`6f47bdfcaadfd4f510c5e1621c07945d`, `output-x64.5`, older than the `output-x64.7` shipped here.)
+`6f47bdfcaadfd4f510c5e1621c07945d`, `output-x64.5`, older than the `output-x64.8` shipped here.)
 
 **Licensing:** This FFmpeg build is compiled with `--enable-gpl`, making the resulting binaries GPL-3.0+. See https://ffmpeg.org/legal.html for full details.
 
 **Note:** FFmpeg is an optional external dependency. Without it, multi-channel audio files are skipped with a warning and the bitUsage / HF-analysis fields are omitted. Truedat itself (MIT) does not link against FFmpeg — it invokes the executables as subprocesses.
 
 ## Output Files
+
+The catalog, its sidecar, the edges file, the store and the `store-*.json` records are written beside the catalog, where
+a player reads them, and so are your exclusion rules. Everything else truedat writes — the error and skipped lists, scan
+summaries, the log, backups and archives — goes to its work folder: the folder with `truedat.exe` when that is the catalog
+folder or a folder inside it, otherwise `libraries\<library-id>\` under the exe's folder, or the folder `--work-dir` names.
 
 ### Analysis Mode
 
@@ -129,12 +134,13 @@ resolved location an ordinary scan uses it. See `STORE.md` for the schema and lo
 
 | File                                                               | Description                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `truedat.db`                                                       | The v2 SQLite store (schema 4) beside the catalog, or under `%LOCALAPPDATA%\truedat\<library-id>\` when the catalog folder is a share. With a store in force it is the authority: the scan records into it and the catalog and sidecar are published from it.                                                              |
+| `truedat.db`                                                       | The v2 SQLite store (schema 5) beside the catalog, or under `%LOCALAPPDATA%\truedat\<library-id>\` when the catalog folder is a share. With a store in force it is the authority: the scan records into it and the catalog and sidecar are published from it.                                                              |
 | `truedat.db-wal`, `truedat.db-shm`                                 | SQLite write-ahead log and shared-memory index. A live store's committed state spans all three files, which is why `--snapshot` bundles a `VACUUM INTO` copy rather than a file copy.                                                                                                                                        |
 | `mbxedges.v1.json`                                                 | Edge companion for a player's transition logic: per-track head and tail rows (key and its agreement, tempo, loudness and fade shape, centroid, dissonance, chroma, texture, and each edge's divergence from the whole track). Rewritten after any scan that added edge rows, or by `--edges-export`. |
 | `store-result.json`, `store-import-result.json`, `store-info.json` | Machine-readable records of the last store write, import and info run — read by a launcher instead of scraping stdout.                                                                                                                                                                                                       |
 | `pending\` in the staging folder                                   | In-flight edge data while a scan runs, under `%TEMP%\.truedat-stage` or `--stage-dir`; consumed when the scan writes the store.                                                                                                                                                                                                                                                                                 |
 | `mbxmoods.json.bak.<ts>.zip`                                       | Compressed rotated backup taken before any catalog-mutating verb (`--keep-backups N`, default 2).                                                                                                                                                                                                                            |
+| `mbxmoods-clear-<ts>.zip`, `mbxmoods-reset-<ts>.zip`               | The archive `--clear` or `--reset` writes before it removes anything: every file it takes for the library. `--restore` brings the catalog back, the store when one is in force, and — from a reset archive — your exclusion rules and duplicate verdicts. |
 | `mbxmoods-snapshot-<ts>.zip`                                       | `--snapshot`: the catalog (and the store as a `VACUUM INTO` copy) plus a manifest carrying track count, schema, generation and SHA-256. `--restore` validates it opens and passes an integrity check before replacing anything.                                                                                              |
 
 ### Synthetic Library Mode (`--synthesize`)

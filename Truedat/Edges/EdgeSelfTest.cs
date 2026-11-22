@@ -58,18 +58,18 @@ namespace Truedat.Edges
         /// (plan B6 [c1]: registering .6 alone would have skipped default edges and refused --edges).</summary>
         static void TestExtractorBuild(Action<bool, string> assert)
         {
-            foreach (var build in new[] { "output-x64.5", "output-x64.6", "output-x64.7" })
+            foreach (var build in new[] { "output-x64.5", "output-x64.6", "output-x64.7", "output-x64.8" })
             {
                 var exe = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", build, "essentia_streaming_extractor_music.exe"));
                 if (exe == null) { Console.WriteLine($"  SKIP  essentia-build/{build} exe not found from the test binary"); continue; }
                 var id = Program.ExtractorBuildId(exe);
                 assert(id == build, $"the committed {build} exe resolves to its build name (got {id})");
             }
-            assert(string.Equals(Program.LatestExtractorMd5, "0fb6f804f8f53dad65c4c963e6447e47", StringComparison.OrdinalIgnoreCase),
-                $"the latest known extractor is .7 (9844483: fused HPCP + shared decode; got {Program.LatestExtractorMd5})");
+            assert(string.Equals(Program.LatestExtractorMd5, "192f3cfa530f2f58f04dc2668f4d9643", StringComparison.OrdinalIgnoreCase),
+                $"the latest known extractor is .8 (0ed34b3: the .7 sources built profile-guided with link-time optimization; got {Program.LatestExtractorMd5})");
             assert(!EdgeProducer.SupportsFrames("output-x64.4") && EdgeProducer.SupportsFrames("output-x64.5") && EdgeProducer.SupportsFrames("output-x64.6")
-                   && EdgeProducer.SupportsFrames("output-x64.7") && !EdgeProducer.SupportsFrames(null),
-                $"binary frames: .4 no, .5 / .6 / .7 yes, unknown no ({EdgeProducer.SupportedBuildsText})");
+                   && EdgeProducer.SupportsFrames("output-x64.7") && EdgeProducer.SupportsFrames("output-x64.8") && !EdgeProducer.SupportsFrames(null),
+                $"binary frames: .4 no, .5 / .6 / .7 / .8 yes, unknown no ({EdgeProducer.SupportedBuildsText})");
         }
 
         /// <summary>Extractor .7's RAM spool cap (x7.spoolMaxBytes) is written by truedat per track: the room that track was given from
@@ -81,7 +81,7 @@ namespace Truedat.Edges
                    && EdgeProducer.ProfileTextFor(true, true, 0) == EdgeProducer.ProfileText() + EdgeProducer.ScanProfileKeys + "x7.spoolMaxBytes: 0\n"
                    && EdgeProducer.ProfileTextFor(false, true, null) == EdgeProducer.ScanProfileKeys,
                 "profile text carries x7.spoolMaxBytes only when a cap is given (a .7-capable exe), after the scan keys");
-            foreach (var (build, capable) in new[] { ("output-x64.5", false), ("output-x64.6", false), ("output-x64.7", true) })
+            foreach (var (build, capable) in new[] { ("output-x64.5", false), ("output-x64.6", false), ("output-x64.7", true), ("output-x64.8", true) })
             {
                 var exe = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", build, "essentia_streaming_extractor_music.exe"));
                 if (exe == null) { Console.WriteLine($"  SKIP  spool capability of {build}: exe not found from the test binary"); continue; }
@@ -107,15 +107,15 @@ namespace Truedat.Edges
                    && EdgeProducer.ProfileTextFor(true, false) == EdgeProducer.ProfileText()
                    && EdgeProducer.ScanProfileKeys.Contains("x6.md5: 1\n"),
                 "profile text: scan keys alone, frames + scan keys, frames alone; x6.md5 stays ON (the frames prefix needs md5_encoded)");
-            // The CURRENT extractor (.7) with exactly what truedat writes for it: the scan keys + the RAM spool cap (here 256 MiB, so the
+            // The CURRENT extractor (.8) with exactly what truedat writes for it: the scan keys + the RAM spool cap (here 256 MiB, so the
             // clip spools), parsed against the full 2-arg output of the same exe.
-            var exe = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "output-x64.7", "essentia_streaming_extractor_music.exe"));
+            var exe = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("essentia-build", "output-x64.8", "essentia_streaming_extractor_music.exe"));
             // Committed fixture (350 KB of tests/edges/fixtures), not the 6.6 GB build spike it was cut
             // from: the spike is archived off-box, and a test that only ran where the spike happened to
             // survive is a test that silently stopped running everywhere else.
             var clip = FindUpward(AppContext.BaseDirectory, System.IO.Path.Combine("tests", "edges", "fixtures", "clip-44k-stereo-short.flac"));
-            if (exe == null || clip == null) { Console.WriteLine("  NOT RUN  scan-profile end to end: needs the committed .7 exe and tests/edges/fixtures/clip-44k-stereo-short.flac, found upward from the test binary"); return; }
-            assert(Program.ScanProfileCapable(exe) && Program.SpoolCapable(exe), "the committed .7 honours the scan profile AND the spool cap — its MD5 is in both sets");
+            if (exe == null || clip == null) { Console.WriteLine("  NOT RUN  scan-profile end to end: needs the committed .8 exe and tests/edges/fixtures/clip-44k-stereo-short.flac, found upward from the test binary"); return; }
+            assert(Program.ScanProfileCapable(exe) && Program.SpoolCapable(exe), "the committed .8 honours the scan profile AND the spool cap — its MD5 is in both sets");
             var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "truedat-scanprofile-" + Guid.NewGuid().ToString("N"));
             System.IO.Directory.CreateDirectory(dir);
             try
@@ -123,11 +123,11 @@ namespace Truedat.Edges
                 string fullJson = System.IO.Path.Combine(dir, "full.json"), scanJson = System.IO.Path.Combine(dir, "scan.json");
                 var (profile, frames) = EdgeProducer.PrepareFor(scanJson, edges: false, scan: true, spoolMaxBytes: 256L << 20);
                 assert(profile != null && frames == null && System.IO.File.ReadAllText(profile) == EdgeProducer.ScanProfileKeys + "x7.spoolMaxBytes: 268435456\n",
-                    "PrepareFor(scan only, .7) writes the scan keys + the spool cap beside the output and asks for no frames file");
+                    "PrepareFor(scan only, .8) writes the scan keys + the spool cap beside the output and asks for no frames file");
                 int rcFull = RunExtractor(exe, Program.ExtractorArguments(clip, fullJson, null, null));
                 int rcScan = RunExtractor(exe, Program.ExtractorArguments(clip, scanJson, profile, null));
                 assert(rcFull == 0 && rcScan == 0 && System.IO.File.Exists(fullJson) && System.IO.File.Exists(scanJson),
-                    $"the .7 extractor completes the clip under both calls (full rc {rcFull}, scan + spool rc {rcScan})");
+                    $"the .8 extractor completes the clip under both calls (full rc {rcFull}, scan + spool rc {rcScan})");
                 if (rcFull != 0 || rcScan != 0) return;
                 string fullText = System.IO.File.ReadAllText(fullJson), scanText = System.IO.File.ReadAllText(scanJson);
                 int fullLeaves = CountLeaves(fullText), scanLeaves = CountLeaves(scanText);

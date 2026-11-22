@@ -11892,11 +11892,12 @@ namespace Truedat
         // loop dropped most of each APE file — any .5 APE analysis is truncated and .6
         // changes it (WMA Lossless: same decoder family, untested). The refresh set after
         // .6 is the catalog's .ape entries (+ wmalossless .wma), not the library.
-        internal const string LatestExtractorMd5 = "0fb6f804f8f53dad65c4c963e6447e47";
-        internal const string LatestExtractorSummary = "output-x64.7: .6 plus one decode per file (kept in RAM for the later passes) and one HPCP pass for chords and tuning - same output, ~11% less extractor time";
+        internal const string LatestExtractorMd5 = "192f3cfa530f2f58f04dc2668f4d9643";
+        internal const string LatestExtractorSummary = "output-x64.8: the .7 analysis code built profile-guided with link-time optimization - same output, about 2% less extractor time";
         static readonly Dictionary<string, string> KnownExtractors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["0fb6f804f8f53dad65c4c963e6447e47"] = "output-x64.7 — .6 plus shared decode (RAM spool, capped per track), fused chords/tuning HPCP, and streaming Danceability/DynamicComplexity; same output (current, 220d877)",
+            ["192f3cfa530f2f58f04dc2668f4d9643"] = "output-x64.8 — the .7 sources and flags built profile-guided with link-time optimization; same output, about 2% less extractor time (current, 0ed34b3)",
+            ["0fb6f804f8f53dad65c4c963e6447e47"] = "output-x64.7 — .6 plus shared decode (RAM spool, capped per track), fused chords/tuning HPCP, and streaming Danceability/DynamicComplexity; same output (220d877; the .8 fallback)",
             // Every accepted .6 drop keeps its MD5 here under the same name (option A): a deployed earlier drop must still resolve by name.
             ["64b55cec008649c673fa13c9ab8dd4b6"] = "output-x64.6 — optimized, accurate bpm, 13-hour file support, binary frames for --edges, decoder fix, scan profile (drop 2, 296f87d; the .7 fallback)",
             ["2fe852f564c894691e144697c6a0d200"] = "output-x64.6 — drop 1 (7319de5): decoder fix only; fails on APE (StereoDemuxer overflow) and refuses the scan profile — superseded by drop 2",
@@ -11915,6 +11916,7 @@ namespace Truedat
         {
             "64b55cec008649c673fa13c9ab8dd4b6",   // .6 drop 2 (296f87d)
             "0fb6f804f8f53dad65c4c963e6447e47",   // .7 (220d877)
+            "192f3cfa530f2f58f04dc2668f4d9643",   // .8 (0ed34b3)
         };
         static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _extractorMd5ByPath = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -11928,6 +11930,7 @@ namespace Truedat
         static readonly HashSet<string> SpoolCapableMd5s = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "0fb6f804f8f53dad65c4c963e6447e47",   // .7 (220d877)
+            "192f3cfa530f2f58f04dc2668f4d9643",   // .8 (0ed34b3): the same sources, so the same spool
         };
 
         internal static bool SpoolCapable(string exePath)
@@ -22763,7 +22766,7 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                     Assert(cl.Exists(l => l.StartsWith("    " + "edges".PadRight(17) + " true", StringComparison.Ordinal)), $"config-listing: edges' value sits on the key's own line at {cw} columns");
                 }
                 // -v environment check: the extractor reads as its build name and whether it is current; ffmpeg as its version token.
-                Assert(ExtractorBuildLabel(LatestExtractorMd5) == "output-x64.7 (current)", $"env: the current extractor is labelled current ({ExtractorBuildLabel(LatestExtractorMd5)})");
+                Assert(ExtractorBuildLabel(LatestExtractorMd5) == "output-x64.8 (current)", $"env: the current extractor is labelled current ({ExtractorBuildLabel(LatestExtractorMd5)})");
                 Assert(ExtractorBuildLabel("6f47bdfcaadfd4f510c5e1621c07945d") == "output-x64.5 (older; update the extractor)", $"env: an older known build says so ({ExtractorBuildLabel("6f47bdfcaadfd4f510c5e1621c07945d")})");
                 Assert(ExtractorBuildLabel("0123456789abcdef0123456789abcdef").StartsWith("unrecognized build", StringComparison.Ordinal), "env: an unknown build is unrecognized");
                 Assert(FfmpegVersionFrom("ffmpeg version 2026-10-08-git-ec420ba161-full_build-www.gyan.dev Copyright (c) 2000-2026") == "2026-10-08-git-ec420ba161-full_build-www.gyan.dev", "env: ffmpeg's version token is read");

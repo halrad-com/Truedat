@@ -28,7 +28,7 @@ namespace Truedat.Edges
         /// <summary>The extractor builds that carry the binary frames writer (<c>--frames-bin</c> + <c>framesInclude</c>) the edges
         /// path reads — a capability set, not one exact string (plan B6 [c1]). Format compatibility lives here; measurement provenance
         /// (which edges an extractor change invalidates) is the edge producer version, never the build id.</summary>
-        internal static readonly string[] SupportedBuilds = { "output-x64.5", "output-x64.6", "output-x64.7" };
+        internal static readonly string[] SupportedBuilds = { "output-x64.5", "output-x64.6", "output-x64.7", "output-x64.8" };
         internal static string SupportedBuildsText => string.Join(" or ", SupportedBuilds);
         internal static bool SupportsFrames(string? build)
             => build != null && Array.Exists(SupportedBuilds, b => string.Equals(b, build, StringComparison.OrdinalIgnoreCase));
