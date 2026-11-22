@@ -369,10 +369,66 @@ namespace Truedat
             return (stamp, n);
         }
 
-        /// <summary>Decompress/copy the catalog JSON out of an archive (zip/gz/plain)
-        /// into <paramref name="dest"/>. Streaming — never materializes the whole
-        /// catalog.</summary>
-        internal static void ExtractCatalogTo(string archivePath, Stream dest)
+        /// <summary>The names a zip's catalog member can have, in the order they are looked for: the canonical name; the destination
+        /// catalog's own name (a reset of a catalog <c>--moods</c> named keeps it under that name); and the name the archive's own file
+        /// name declares — <c>&lt;catalog&gt;.bak.</c>, <c>.retired.</c>, <c>.imported.</c>, <c>.damaged.</c>, which is how a retired or pinned
+        /// custom-named catalog is found when it is restored somewhere else. Nothing else is a catalog. Until 2026-11-22 an archive
+        /// holding none of these restored its FIRST entry as the catalog: a reset archive holding only the exclusion rules installed
+        /// the rules as mbxmoods.json and exited 0, and a custom catalog's reset archive installed apply-result.json (review #1).
+        /// A name that is one of the operator's files, the manifest or the edges companion is never a candidate.</summary>
+        internal static List<string> CatalogEntryCandidates(string archivePath, string? destCatalogName)
+        {
+            var names = new List<string>();
+            void Add(string? n)
+            {
+                if (string.IsNullOrEmpty(n) || names.Contains(n!, StringComparer.OrdinalIgnoreCase)) return;
+                if (n!.IndexOf('/') >= 0 || n.IndexOf('\\') >= 0) return;
+                if (ResetCommand.IsOperatorFile(n) || string.Equals(n, ManifestEntryName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(n, global::Truedat.Edges.EdgeCompanion.FileName, StringComparison.OrdinalIgnoreCase)) return;
+                names.Add(n);
+            }
+            Add(CatalogEntryName);
+            Add(destCatalogName);
+            var file = Path.GetFileName(archivePath) ?? "";
+            foreach (var marker in new[] { ".bak.", ".retired.", ".imported.", ".damaged." })
+            {
+                int at = file.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+                if (at > 0) { Add(file.Substring(0, at)); break; }
+            }
+            return names;
+        }
+
+        /// <summary>The catalog inside an open zip: for each candidate name in order, the single top-level entry of that name, else the
+        /// numbered parts of that name (<c>&lt;name&gt;.N</c>, one file OR parts, never both). Null when the zip holds no catalog.</summary>
+        static (List<ZipArchiveEntry> Entries, bool Parts)? LocateCatalog(ZipArchive zip, IReadOnlyList<string> candidates)
+        {
+            foreach (var name in candidates)
+            {
+                var single = zip.Entries.FirstOrDefault(e => string.Equals(e.FullName, name, StringComparison.OrdinalIgnoreCase));
+                if (single != null) return (new List<ZipArchiveEntry> { single }, false);
+                var parts = new List<(ZipArchiveEntry Entry, int Part)>();
+                foreach (var e in zip.Entries)
+                    if (TryPartName(e.FullName, out var catalogName, out var part) && string.Equals(catalogName, name, StringComparison.OrdinalIgnoreCase))
+                        parts.Add((e, part));
+                if (parts.Count > 0) return (parts.OrderBy(p => p.Part).Select(p => p.Entry).ToList(), true);
+            }
+            return null;
+        }
+
+        /// <summary>Does this archive hold a catalog a restore into <paramref name="destCatalogName"/> would install? A gzip or a plain file
+        /// is a catalog by construction; a zip only when <see cref="CatalogEntryCandidates"/> finds one. Asked BEFORE anything is staged,
+        /// so an archive without one (a reset of a library that had only its rules) never reaches the catalog.</summary>
+        internal static bool HoldsCatalog(string archivePath, string? destCatalogName)
+        {
+            if (SniffFile(archivePath) != CatalogFormat.Zip) return true;
+            using var zip = ZipFile.OpenRead(archivePath);
+            return LocateCatalog(zip, CatalogEntryCandidates(archivePath, destCatalogName)) != null;
+        }
+
+        /// <summary>Decompress/copy the catalog JSON out of an archive (zip/gz/plain) into <paramref name="dest"/>. Streaming — never
+        /// materializes the whole catalog. A zip's catalog is found by name only (<see cref="CatalogEntryCandidates"/>), never by
+        /// position; a zip that holds none throws <see cref="InvalidDataException"/> and writes nothing to <paramref name="dest"/>.</summary>
+        internal static void ExtractCatalogTo(string archivePath, Stream dest, string? destCatalogName = null)
         {
             var fmt = SniffFile(archivePath);
             using var fs = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
@@ -381,19 +437,12 @@ namespace Truedat
                 case CatalogFormat.Zip:
                     using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
                     {
-                        if (zip.GetEntry(CatalogEntryName) == null)
-                        {
-                            // A pinned or retired split catalog: <name>.json.1, .3, … and no single-file entry. Restore it as one catalog
-                            // (the canonical name's set first when an archive somehow holds two).
-                            var sets = zip.Entries.Select(e => TryPartName(e.Name, out var n, out var k) ? (Entry: e, Name: n, Part: k) : (Entry: (ZipArchiveEntry?)null, Name: "", Part: 0))
-                                .Where(x => x.Entry != null).GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-                                .OrderBy(g => string.Equals(g.Key, CatalogEntryName, StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
-                                .ToList();
-                            if (sets.Count > 0) { MergeCatalogParts(sets[0].OrderBy(x => x.Part).Select(x => x.Entry!).ToList(), dest); break; }
-                        }
-                        var entry = FindCatalogEntry(zip)
-                            ?? throw new InvalidDataException($"No {CatalogEntryName} entry found in archive: {archivePath}");
-                        using var es = entry.Open();
+                        var candidates = CatalogEntryCandidates(archivePath, destCatalogName);
+                        var found = LocateCatalog(zip, candidates)
+                            ?? throw new InvalidDataException($"{archivePath} holds no catalog (looked for {string.Join(", ", candidates)} and their numbered parts)");
+                        // A pinned or retired split catalog: <name>.json.1, .3, … — restored as one catalog.
+                        if (found.Parts) { MergeCatalogParts(found.Entries, dest); break; }
+                        using var es = found.Entries[0].Open();
                         es.CopyTo(dest);
                     }
                     break;
@@ -405,21 +454,6 @@ namespace Truedat
                     fs.CopyTo(dest);
                     break;
             }
-        }
-
-        private static ZipArchiveEntry? FindCatalogEntry(ZipArchive zip)
-        {
-            // Prefer the canonical name; fall back to the first .json entry that isn't
-            // the manifest or the exclusion file, then to the first entry.
-            var e = zip.GetEntry(CatalogEntryName);
-            if (e != null) return e;
-            // A retired zip also holds the edges companion (mbxedges.v1.json): never restore that as the catalog.
-            e = zip.Entries.FirstOrDefault(x =>
-                x.Name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
-                && !x.Name.Equals(ManifestEntryName, StringComparison.OrdinalIgnoreCase)
-                && !x.Name.Equals(ExcludeEntryName, StringComparison.OrdinalIgnoreCase)
-                && !x.Name.Equals(global::Truedat.Edges.EdgeCompanion.FileName, StringComparison.OrdinalIgnoreCase));
-            return e ?? zip.Entries.FirstOrDefault();
         }
 
         /// <summary>True when a ZIP archive carries an mbxmoods-exclude.json entry.</summary>

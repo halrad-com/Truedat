@@ -32,7 +32,110 @@ namespace Truedat
             TestCollectAndExecute(assert);
             TestIgnoreCarried(assert);
             TestRuleRestore(assert);
+            TestRestoreArchiveShapes(assert);
             TestCli(assert);
+        }
+
+        /// <summary>--restore of archives whose shape is not "a catalog and maybe its rules", in child processes (a restore needs no
+        /// extractor, so these always run). Review 2026-11-21: #1 a reset archive holding only the exclusion rules installed the rules
+        /// AS the catalog (the "first entry" fallback); a custom-named catalog's reset archive restored apply-result.json as the
+        /// catalog the same way. #4 a rule entry whose name holds a backslash resolved outside the catalog folder, and was written there.</summary>
+        static void TestRestoreArchiveShapes(Action<bool, string> assert)
+        {
+            var exe = typeof(Program).Assembly.Location;
+            var root = Path.Combine(Path.GetTempPath(), ".truedat-selftest", "restore-shapes-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            bool keep = false;
+            try
+            {
+                const string Good = "{\"version\":1,\"generatedBy\":\"restore-shapes\",\"trackCount\":0,\"tracks\":{}}";
+                const string Rules = "{\"version\":1,\"rules\":[{\"kind\":\"folder\",\"action\":\"exclude\",\"target\":\"X:\\\\never\"}]}";
+                void Check(bool cond, string msg) { if (!cond) keep = true; assert(cond, msg + (cond ? "" : "  [fixture kept: " + root + "]")); }
+                string Zip(string dir, string name, params (string Entry, string Content)[] members)
+                {
+                    Directory.CreateDirectory(dir);
+                    var path = Path.Combine(dir, name);
+                    using (var fs = new FileStream(path, FileMode.CreateNew))
+                    using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
+                        foreach (var m in members)
+                        {
+                            using var w = new StreamWriter(zip.CreateEntry(m.Entry).Open());
+                            w.Write(m.Content);
+                        }
+                    return path;
+                }
+
+                // ---- #1: a reset archive of a library that had rules and nothing else
+                {
+                    var lib = Path.Combine(root, "rules-only", "Library");
+                    Directory.CreateDirectory(lib);
+                    var catalog = Path.Combine(lib, Program.MoodsFileName);
+                    File.WriteAllText(catalog, Good);
+                    var before = File.ReadAllBytes(catalog);
+                    var zip = Zip(Path.Combine(root, "rules-only"), "mbxmoods-reset-20261121-010203.zip", (ExclusionStore.FileName, Rules));
+                    var output = RunChild(exe, lib, "--no-config --no-store --restore " + Q(zip) + " --moods " + Q(catalog), out int exit);
+                    File.WriteAllText(Path.Combine(root, "rules-only.log"), output);
+                    Check(File.ReadAllBytes(catalog).SequenceEqual(before),
+                        "restore-shapes #1: a rules-only reset archive leaves the catalog byte for byte as it was (the rules are never installed as the catalog)");
+                    var rulesBack = Path.Combine(lib, ExclusionStore.FileName);
+                    Check(exit == 0 && File.Exists(rulesBack) && File.ReadAllText(rulesBack) == Rules,
+                        $"restore-shapes #1: and it restores what it holds, the rule file, byte for byte (exit {exit})");
+                    Check(!Directory.GetFiles(lib, "*.restore.tmp").Any() && !Directory.GetFiles(lib, Program.MoodsFileName + ".bak.*").Any(),
+                        "restore-shapes #1: nothing was staged or backed up for a catalog the archive does not hold");
+                }
+
+                // ---- #1: an archive holding neither a catalog nor a rule file is refused, and changes nothing
+                {
+                    var lib = Path.Combine(root, "nothing", "Library");
+                    Directory.CreateDirectory(lib);
+                    var catalog = Path.Combine(lib, Program.MoodsFileName);
+                    File.WriteAllText(catalog, Good);
+                    var zip = Zip(Path.Combine(root, "nothing"), "mbxmoods-reset-20261121-010204.zip", ("store-result.json", "{\"kind\":\"x\"}"), ("work/mbxmoods-errors.csv", "e"));
+                    var output = RunChild(exe, lib, "--no-config --no-store --restore " + Q(zip) + " --moods " + Q(catalog), out int exit);
+                    File.WriteAllText(Path.Combine(root, "nothing.log"), output);
+                    Check(exit != 0 && File.ReadAllText(catalog) == Good && output.Contains("no catalog"),
+                        $"restore-shapes #1: an archive with no catalog and no rule file is refused with a sentence, the catalog untouched (exit {exit})");
+                }
+
+                // ---- #1: a custom-named catalog's reset archive restores THAT catalog, not the first .json in the archive
+                {
+                    var lib = Path.Combine(root, "custom", "Library");
+                    Directory.CreateDirectory(lib);
+                    var catalog = Path.Combine(lib, "mbxmoods-alt.json");
+                    File.WriteAllText(catalog, "{\"tracks\":{}}");
+                    var zip = Zip(Path.Combine(root, "custom"), "mbxmoods-reset-20261121-010205.zip",
+                        ("apply-result.json", "{\"schemaVersion\":1,\"kind\":\"exclusion-apply-result\",\"ok\":true}"), ("mbxmoods-alt.json", Good));
+                    var output = RunChild(exe, lib, "--no-config --no-store --restore " + Q(zip) + " --moods " + Q(catalog), out int exit);
+                    File.WriteAllText(Path.Combine(root, "custom.log"), output);
+                    Check(exit == 0 && File.ReadAllText(catalog) == Good,
+                        $"restore-shapes #1: a custom-named catalog's reset archive restores its own catalog entry (exit {exit}, catalog now {(File.Exists(catalog) ? File.ReadAllText(catalog) : "<absent>")})");
+                }
+
+                // ---- #4: a rule entry whose name walks out of the catalog folder: the whole archive is refused before any write
+                {
+                    var case4 = Path.Combine(root, "escape");
+                    var lib = Path.Combine(case4, "Library");
+                    Directory.CreateDirectory(lib);
+                    var catalog = Path.Combine(lib, Program.MoodsFileName);
+                    File.WriteAllText(catalog, Good);
+                    var before = File.ReadAllBytes(catalog);
+                    var evilName = ExclusionStore.FileName + "\\..\\..\\x.json";
+                    var zip = Zip(case4, "mbxmoods-reset-20261121-010206.zip", (Program.MoodsFileName, "{\"tracks\":{\"restored\":{}}}"), (evilName, Rules));
+                    bool fixtureIsTheAttack;
+                    using (var z = ZipFile.OpenRead(zip)) fixtureIsTheAttack = z.Entries.Any(e => e.FullName == evilName);
+                    Check(fixtureIsTheAttack, "restore-shapes #4: the fixture archive really holds an entry named " + evilName);
+                    var output = RunChild(exe, lib, "--no-config --no-store --restore " + Q(zip) + " --moods " + Q(catalog), out int exit);
+                    File.WriteAllText(Path.Combine(root, "escape.log"), output);
+                    var outside = Path.Combine(case4, "x.json");
+                    Check(!File.Exists(outside) && !File.Exists(outside + ".restore.tmp"),
+                        $"restore-shapes #4: nothing is written outside the catalog folder ({outside})");
+                    Check(exit != 0 && File.ReadAllBytes(catalog).SequenceEqual(before) && !Directory.GetFiles(lib, Program.MoodsFileName + ".bak.*").Any(),
+                        $"restore-shapes #4: the whole archive is refused before any write - the catalog is untouched and was not backed up (exit {exit})");
+                    Check(output.Contains("is refused") && output.Contains("not a plain file name") && output.Contains(evilName),
+                        "restore-shapes #4: the refusal says why and names the entry");
+                }
+            }
+            catch (Exception ex) { keep = true; assert(false, "restore-shapes: threw " + ex.GetType().Name + ": " + ex.Message + "  [fixture kept: " + root + "]"); }
+            finally { if (!keep) { try { Directory.Delete(root, true); } catch { } } }
         }
 
         static void TestFlags(Action<bool, string> assert)

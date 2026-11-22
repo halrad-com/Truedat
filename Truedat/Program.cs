@@ -3611,6 +3611,17 @@ namespace Truedat
                 try
                 {
                     var located = FindArchiveByName(restoreArchivePath, restoreCatalogGuess);
+                    // Review #4: an entry whose name is not a plain file name (a backslash, a "..", a drive, a root) could steer a write
+                    // out of the folder the restore writes into. truedat's own archives never hold one, so the WHOLE archive is refused
+                    // here, before any catalog, store or rule file is touched.
+                    var unsafeNames = !string.IsNullOrEmpty(located) && File.Exists(located!) ? ResetCommand.UnsafeEntries(located!) : new List<string>();
+                    if (unsafeNames.Count > 0)
+                    {
+                        Console.Error.WriteLine($"Error: {located} is refused: {(unsafeNames.Count == 1 ? "an entry's name is" : "some entries' names are")} not a plain file name, and a restore never writes outside the folder it restores into. Nothing was changed.");
+                        foreach (var n in unsafeNames) Console.Error.WriteLine("  " + n);
+                        Environment.ExitCode = 1;
+                        return;
+                    }
                     ruleEntries = !string.IsNullOrEmpty(located) && File.Exists(located!)
                         ? ResetCommand.RuleEntries(located!) : new List<string>();
                     var inTheWay = ruleEntries.Count > 0 && ruleDir != null ? ResetCommand.RuleConflicts(ruleEntries, ruleDir) : new List<string>();
@@ -11749,6 +11760,25 @@ namespace Truedat
             catch (Exception ex) { Console.Error.WriteLine($"Error: cannot read archive: {ex.Message}"); return 1; }
             Console.WriteLine($"  Format:      {fmt.ToString().ToLowerInvariant()}");
 
+            // Review #1: a zip's catalog is found by NAME (CatalogArchive.CatalogEntryCandidates), never by position. A zip with
+            // none — a reset of a library that had its rules and nothing else — restores only what it holds: the caller puts the
+            // rule files back, and the catalog is never staged, backed up or replaced. A zip with neither is refused.
+            bool holdsCatalog;
+            try { holdsCatalog = CatalogArchive.HoldsCatalog(archivePath, Path.GetFileName(destCatalog)); }
+            catch (Exception ex) { Console.Error.WriteLine($"Error: cannot read archive: {ex.Message}"); return 1; }
+            if (!holdsCatalog)
+            {
+                var rules = ResetCommand.RuleEntries(archivePath);
+                if (rules.Count == 0)
+                {
+                    Console.Error.WriteLine($"Error: {archivePath} holds no catalog ({string.Join(", ", CatalogArchive.CatalogEntryCandidates(archivePath, Path.GetFileName(destCatalog)))} or numbered parts of one) and no rule files, so there is nothing to restore. Nothing was changed.");
+                    return 1;
+                }
+                Console.WriteLine();
+                Console.WriteLine($"  The archive holds no catalog, only rule files ({string.Join(", ", rules)}): those are put back, and the catalog is left as it is.");
+                return 0;
+            }
+
             var destDir = Path.GetDirectoryName(Path.GetFullPath(destCatalog));
             if (!string.IsNullOrEmpty(destDir)) Directory.CreateDirectory(destDir!);
 
@@ -11757,7 +11787,7 @@ namespace Truedat
             try
             {
                 using (var dst = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
-                    CatalogArchive.ExtractCatalogTo(archivePath, dst);
+                    CatalogArchive.ExtractCatalogTo(archivePath, dst, Path.GetFileName(destCatalog));
             }
             catch (Exception ex)
             {

@@ -327,27 +327,78 @@ namespace Truedat
                 using var zip = ZipFile.OpenRead(archivePath);
                 if (zip.GetEntry(CatalogArchive.ManifestEntryName) != null) return names;
                 foreach (var e in zip.Entries)
-                    if (e.FullName.IndexOf('/') < 0 && IsOperatorFile(e.FullName)) names.Add(e.FullName);
+                    if (IsLeafName(e.FullName) && IsOperatorFile(e.FullName)) names.Add(e.FullName);
             }
             catch (Exception) { /* not a zip, or unreadable: the restore's own read reports it */ }
             return names;
         }
 
+        /// <summary>A plain file name: no folder in it, by either separator (Windows takes <c>\</c> as one too), no <c>..</c>, no drive, no
+        /// root, no character a file name cannot hold. The only shape a rule file put back beside the catalog may have.</summary>
+        internal static bool IsLeafName(string name)
+        {
+            if (string.IsNullOrEmpty(name) || name == "." || name == "..") return false;
+            if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return false;   // '\', '/', ':', '*', '?', '"', '<', '>', '|', control chars
+            return string.Equals(Path.GetFileName(name), name, StringComparison.Ordinal) && !Path.IsPathRooted(name);
+        }
+
+        /// <summary>The entries of a zip whose names could steer a restore out of the folder it writes into: anything that is not a
+        /// plain name or one of our own <c>folder/name</c> paths built from plain names (<c>work/</c>, <c>store/</c>, <c>review/</c>).
+        /// truedat's own writers never make one; a name with a backslash, a <c>..</c>, a drive or a root is somebody else's archive,
+        /// and the restore refuses the WHOLE archive before it writes anything (review #4). Empty for a gzip or plain file, and for a
+        /// zip that cannot be read (the restore's own read reports that).</summary>
+        internal static List<string> UnsafeEntries(string archivePath)
+        {
+            var bad = new List<string>();
+            try
+            {
+                if (CatalogArchive.SniffFile(archivePath) != CatalogArchive.CatalogFormat.Zip) return bad;
+                using var zip = ZipFile.OpenRead(archivePath);
+                foreach (var e in zip.Entries)
+                {
+                    var segments = e.FullName.Split('/');
+                    bool ok = segments.Length > 0;
+                    for (int i = 0; ok && i < segments.Length; i++)
+                        ok = IsLeafName(segments[i]) || (i == segments.Length - 1 && i > 0 && segments[i].Length == 0);   // "folder/" is a folder entry
+                    if (!ok) bad.Add(e.FullName);
+                }
+            }
+            catch (Exception) { }
+            return bad;
+        }
+
+        /// <summary>Where a rule entry goes: <paramref name="catalogDir"/>\<paramref name="name"/>, and nowhere else — a name that is not a
+        /// leaf, or whose full path's folder is not the catalog folder, throws <see cref="InvalidDataException"/>.</summary>
+        static string RuleDestination(string catalogDir, string name)
+        {
+            if (!IsLeafName(name)) throw new InvalidDataException($"{name} is not a plain file name; a rule file is only ever put back beside the catalog");
+            var dir = Path.GetFullPath(catalogDir);
+            var dest = Path.GetFullPath(Path.Combine(dir, name));
+            var parent = Path.GetDirectoryName(dest);
+            if (parent == null || !string.Equals(parent.TrimEnd(Path.DirectorySeparatorChar), dir.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"{name} does not resolve to a file in {dir}");
+            return dest;
+        }
+
         /// <summary>The rule files a restore would put back that exist now, as full paths. A restore never writes over a
         /// decision the operator has made since the archive; it names the file and stops.</summary>
         internal static List<string> RuleConflicts(IEnumerable<string> entries, string catalogDir)
-            => entries.Select(e => Path.Combine(catalogDir, e)).Where(File.Exists).ToList();
+            => entries.Select(e => RuleDestination(catalogDir, e)).Where(File.Exists).ToList();
 
         /// <summary>Put the operator's files back beside the catalog, byte for byte, each written to a temp name and moved into
-        /// place without writing over anything. Returns how many were put back; throws on the first that cannot be.</summary>
+        /// place without writing over anything. Every name is checked before the first is written: one that is not a plain file name
+        /// beside the catalog stops the step with nothing put back. Returns how many were put back; throws on the first that cannot be.</summary>
         internal static int RestoreRules(string archivePath, IEnumerable<string> entries, string catalogDir)
         {
             int put = 0;
+            var names = entries.ToList();
+            var dests = names.Select(n => RuleDestination(catalogDir, n)).ToList();
             using var zip = ZipFile.OpenRead(archivePath);
-            foreach (var name in entries)
+            for (int i = 0; i < names.Count; i++)
             {
+                var name = names[i];
                 var e = zip.GetEntry(name) ?? throw new IOException($"{name} is not in {archivePath}");
-                var dest = Path.Combine(catalogDir, name);
+                var dest = dests[i];
                 var tmp = dest + ".restore.tmp";
                 try { File.Delete(tmp); } catch { }
                 using (var src = e.Open())
