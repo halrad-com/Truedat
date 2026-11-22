@@ -1,6 +1,7 @@
 # output-x64 Build Variants
 
-Three builds of the x64 Essentia extractor suite live side by side. Same source
+The builds of the x64 Essentia extractor live side by side, one `output-x64.N/`
+folder per build; the newest section is at the end of this file. Same source
 tree (`essentia-src/`, forked from essentia-master v2.1-beta6-dev), same
 toolchain (WSL2 Ubuntu, `x86_64-w64-mingw32-g++`, static link against the
 prebuilt deps in `3rdparty-x64-deps.tar.gz`).
@@ -486,3 +487,85 @@ the loader code is shown by the identical outputs); the mid-stream abandon on a 
 (no duration-less decodable stream in the corpus — unit-tested); more than two channels
 (the loader refuses them before any spool; truedat downmixes first); a physical 8 GB machine;
 a library scan.
+
+## output-x64.8 — the `.7` code, built profile-guided with link-time optimization (2026-11-21)
+
+Same output as `.7` apart from the build id. **No source change to any algorithm** — the only
+source difference from `.7` is the id string (`51dcd45`) — and the same compiler flags
+(`-O2 -ffp-contract=off`, baseline x86-64, no `-march`, no `-ffast-math`). The third-party
+libraries (FFmpeg, FFTW, TagLib, libsamplerate, ...) are the prebuilt static ones, not
+recompiled. What changed is how essentia's own code is compiled:
+
+- **Profile-guided** (`-fprofile-generate`, then `-fprofile-use -fprofile-correction`): an
+  instrumented build is run over real audio in the call shape a truedat scan uses, and the
+  optimized build lays the code out from that recording.
+- **Link-time optimization** (`-flto`): the compiler optimizes across source files at the
+  final link — mostly inlining the small functions essentia's many files call on every frame.
+
+The gain is the two together: the profile-guided build alone measured nothing.
+
+`essentia_streaming_extractor_music.exe`: MD5 **`192f3cfa530f2f58f04dc2668f4d9643`**
+(`0ed34b3`), 17.5 MB against `.7`'s 22.1 MB. Recipe: `run-x8-build.sh` (one-shot scheduled
+task; instrumented build about 13 minutes, optimized build about 11).
+
+**The profile.** Recorded from 29 local tracks (MP3, FLAC, hi-res FLAC converted to 44.1 kHz
+the way truedat converts it, WMA, WMA Lossless, AAC, AIFF) with the scan + edges profile
+truedat sends (`EdgeProducer.ProfileText()` + `ScanProfileKeys`, embedded in the script), on
+GCC 13 (`x86_64-w64-mingw32`, win32 threads). The audio is local and not in the repository;
+**the recorded counters are**: `output-x64.8/profile-gcda.tar.gz` (301 files, MD5
+`0ed581062ebf9f4f3fa10c91ca3022af`), the profile this binary was built from.
+`run-x8-build.sh <dest> output-x64.8/profile-gcda.tar.gz` rebuilds the optimized step from
+it with no audio. Counters fit only these sources and this compiler — after a source change,
+record a new profile.
+
+**Verification** (three whole-corpus passes of every binary, the order rotated each round,
+scan + edges call shape; the extractor does not repeat exactly on most real music — a few
+percent of its values move in the last digits between two runs of one binary — so every
+comparison is made against that same-binary spread, and a plain rebuild of the `.8` sources
+with `.7`'s flags was run as the control):
+
+- Machine A (Intel hybrid-core CPU, AVX2, no AVX-512), 29 tracks, production-shaped (the 12
+  hi-res rows converted first): 6 rows repeat exactly, and on all 6 this binary is
+  byte-identical to `.7` in the main output and in the frames file. On the other 23, 3.87 %
+  of values differ between two runs of one binary and 3.87 % between `.7` and this binary,
+  with the same 99th percentile. With every pass counted (six of `.7`, five of this binary):
+  no descriptor beyond twice the same-binary spread, no key, scale, chord or bpm changed, no
+  key-set difference. The control reads the same.
+- Machine B (AMD Zen 5, AVX-512), 60 tracks from a different library, three rotated passes:
+  1 row repeats exactly, byte-identical on it; 4.89 % against 4.89 %; nothing beyond twice
+  the spread against `.7`; no discrete output changed.
+- Peak working set unchanged on both machines (about 1 % lower: the smaller binary).
+- The recipe run again end to end by `run-x8-build.sh`, with a new training run: a
+  different file (`b52843df655584749db22ec469f4aa7d`), byte-identical to `.7` on the six
+  exactly-repeating rows.
+
+**Measurement** (process CPU of each extractor run, the extractor's own profiler off):
+machine B, per pass, 325.5 / 325.2 / 334.9 s against `.7`'s 332.9 / 332.5 / 341.4 — 2.1 %
+less on the means, 2.2 % on the two passes nothing else disturbed. Machine A was shared
+throughout: 197.2 / 199.4 s against 213.8 / 202.1, which is between 1.3 % and 4.7 % and not
+resolvable more finely; its wall-clock passes show no measurable difference. **About 2 %
+less extractor time** is the claim. With `ESSENTIA_PROFILE` on, this build reads about 7 %
+lower on machine A — that is the profiler's own per-call bookkeeping being inlined, not
+analysis time, and is not a speed figure.
+
+**Not landed.** `-march=x86-64-v3` (AVX2) and `-march=x86-64-v4` (AVX-512) builds were
+measured the same way and their values passed the same gate (AVX-512 on machine B only —
+machine A cannot run it). AVX2 bought nothing on either machine; AVX-512 about 1.5 % on
+machine B, and on a CPU without it the binary dies before
+`main()` (exit `0xC000001D`, nothing printed), so shipping it would need a CPU check in
+truedat for 1.5 %. One extractor ships.
+
+Not verified: the full three-pass gate on a binary rebuilt by the script (the rebuild has
+the identity check above, not the noisy-row comparison); whether a rebuild from the
+committed profile is the same file byte for byte (only its values are claimed); any codec
+outside the two corpora (no APE, no multichannel, nothing above 48 kHz on machine B); a
+library scan.
+
+## Spikes
+
+- **x8 (2026-11-21): profile-guided, link-time-optimized and `-march` builds.** The
+  measurements behind the `output-x64.8` section. Its workspace, `spike-x8/`, is not in the
+  repository (`spike-*/` is ignored: a spike is a workspace, not product); its `README.md`
+  describes the method and `results.md` holds the tables. The one script that outlived the
+  spike is the build recipe, `run-x8-build.sh`, which is tracked here beside
+  `run-x6-build.sh`.

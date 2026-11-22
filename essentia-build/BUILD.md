@@ -51,7 +51,10 @@ essentia-build/
 ├── BUILD.md              ← this file
 ├── build_config.sh       ← x64 config (HOST, versions, flags)
 ├── build_3rdparty.sh     ← master script: builds all deps
-├── build_essentia.sh     ← builds Essentia + extractor
+├── build_essentia.sh     ← builds Essentia + extractor (full rebuild, plain flags)
+├── run-x6-build.sh       ← incremental build of the extractor + its test tools (output-x64.6 / .7)
+├── run-x8-build.sh       ← profile-guided + link-time-optimized build (output-x64.8)
+├── OUTPUT-BUILDS.md      ← what each output-x64.N build is, how it was verified
 ├── 3rdparty/             ← individual dep build scripts + install prefix
 │   ├── build_eigen3.sh
 │   ├── build_fftw3.sh
@@ -65,8 +68,34 @@ essentia-build/
 │   ├── include/          ← (created by build)
 │   └── lib/              ← (created by build)
 ├── essentia-src/         ← full Essentia source tree
+├── output-x64.N/         ← one folder per released extractor build (see OUTPUT-BUILDS.md)
 └── output/               ← final .exe lands here
 ```
+
+## The current extractor build (output-x64.8, 2026-11-21)
+
+The extractor truedat ships is built by `run-x8-build.sh`, not by `build_essentia.sh`. It
+is the same sources and the same compiler flags (`-O2 -ffp-contract=off`, baseline
+x86-64), built in three steps:
+
+1. an **instrumented** build (`-fprofile-generate`);
+2. a **training run** of that build over a list of local audio files, in the call shape a
+   truedat scan uses, which records where the time goes;
+3. an **optimized** build that reads the recording and optimizes across source files at
+   link time (`-fprofile-use -flto`).
+
+```bash
+# record a new profile and build from it (the audio list is local, not in the repo)
+bash run-x8-build.sh <dest dir> <training list>
+# or rebuild from the profile a build was made with - no audio needed
+bash run-x8-build.sh <dest dir> output-x64.8/profile-gcda.tar.gz
+```
+
+The script's header says how the extra flags reach waf without editing the wscript, and
+how the counters get from the Windows program back into the build tree. Recorded counters
+fit only the sources and the gcc they were recorded with: after a source change, record a
+new profile. A new build is accepted on its values, not on the recipe — see the
+`output-x64.8` section of `OUTPUT-BUILDS.md` for the gate.
 
 ## Rebuild Notes (2026-07-10 large-file-patch build)
 

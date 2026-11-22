@@ -14,6 +14,12 @@ no external dependencies. See
 [`essentia-build/OUTPUT-BUILDS.md`](essentia-build/OUTPUT-BUILDS.md) for the
 differences between the two builds.
 
+Later builds of the music extractor alone live in `essentia-build/output-x64.3/` onward,
+one folder per build. **The current one is `essentia-build/output-x64.8/`** — the same
+analysis as `.7`, built profile-guided with link-time optimization
+(`essentia-build/run-x8-build.sh`). `OUTPUT-BUILDS.md` records what each build changed and
+how it was verified; `essentia-build/BUILD.md` describes the `.8` build steps.
+
 The deployed Truedat distribution is in [`dist/truedat/`](dist/truedat/) with both i686 and x64 binaries for comparison.
 
 For a full list of all tools and what they do, see [`essentia-build/tools-summary.md`](essentia-build/tools-summary.md).

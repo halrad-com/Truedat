@@ -75,12 +75,16 @@ if [ -e "$EXE" ]; then
   [ "$tracked" -eq 1 ] || fail "$EXE is committed, or git could not say (exit $tracked) - refusing to overwrite it; build to a new dir"
 fi
 JOBS="${X8_JOBS:-8}"
-OUT=build/x8
+# X8_OUT names another out dir under essentia-src/build/ (default x8). A rebuild from
+# a recorded profile into the dir a previous run just used would find every object up
+# to date - waf does not know the counters changed - so a repeat build that is meant
+# to prove something goes into a fresh one.
+OUT="build/${X8_OUT:-x8}"
 BUILD="$ROOT/essentia-src/$OUT"
-TRAIN="$ROOT/essentia-src/build/x8-train"
-GCOV="$ROOT/essentia-src/build/x8-gcov"
+TRAIN="$BUILD-train"
+GCOV="$BUILD-gcov"
 export PKG_CONFIG_PATH="$ROOT/3rdparty/lib/pkgconfig"
-export WAFLOCK=.lock-waf-x8
+export WAFLOCK=".lock-waf-$(basename "$OUT")"
 echo "START $(date) dest=$DEST list=$LIST" >> "$LOG"
 
 build() {   # build <step name> <compile flags> <link flags>
