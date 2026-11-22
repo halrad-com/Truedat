@@ -3207,7 +3207,7 @@ namespace Truedat
             // The work folder (2026-11-21): the rule is configured here, before any catalog is known; each library's folder is settled
             // by the first writing use of it (BeginWork). A reading run never sets the hook, so it never creates or moves anything.
             WorkFolder.Configure(workDir, AppDomain.CurrentDomain.BaseDirectory);
-            lock (_workGate) { _workLines.Clear(); _workLinesShown = 0; _workHeaderShown = false; }   // a Main run in-process (self-tests) starts clean
+            ResetWorkForTest(auditLog);   // a Main run in-process (self-tests) starts clean
             WorkFolder.BeginOnFirstUse = null;
             if (!IsReadingRun(statsMode, storeInfoMode, listReviewMode, pathsMode, previewMode, showHelp, storeSummaryMode, verifyCoverageMode, selfTest,
                               noLibrary: transcodeMode || convertDirMode || synthesize || seedMoods))
@@ -13767,6 +13767,16 @@ namespace Truedat
         static readonly List<string> _workLines = new List<string>();
         static int _workLinesShown;
         static bool _workHeaderShown;
+        /// <summary>--audit was given: the moved names are shown on the console as well as written to truedat.log.</summary>
+        static bool _workAudit;
+        /// <summary>The names each catalog folder's move took, waiting for <see cref="ShowWork"/> to write them down.</summary>
+        static readonly List<(string Dir, List<string> Names)> _workNames = new List<(string Dir, List<string> Names)>();
+
+        /// <summary>A Main run in-process (self-tests) starts with nothing said and nothing pending.</summary>
+        internal static void ResetWorkForTest(bool audit)
+        {
+            lock (_workGate) { _workLines.Clear(); _workLinesShown = 0; _workHeaderShown = false; _workAudit = audit; _workNames.Clear(); }
+        }
 
         /// <summary>A WRITING run settles the work folder for the library whose catalog is <paramref name="catalogPath"/> and moves
         /// the working files beside the catalog into it — before any of them is read, so the errors list the scan consults, the
@@ -13784,8 +13794,11 @@ namespace Truedat
                 {
                     WorkFolder.Begin(dir, out var note);
                     if (note != null) _workLines.Add(note);
-                    var moved = WorkFolder.Describe(WorkFolder.MoveExisting(catalogPath, _storePath));
+                    var report = WorkFolder.MoveExisting(catalogPath, _storePath);
+                    var moved = WorkFolder.Describe(report);
                     if (moved != null) _workLines.Add(moved);
+                    var names = WorkFolder.MovedNames(report, dir);
+                    if (names.Count > 0) _workNames.Add((dir, names));
                 }
                 catch (Exception ex) { _workLines.Add($"Work folder: the move did not run ({ex.Message}); the working files are read where they are"); }
             }
@@ -13800,6 +13813,21 @@ namespace Truedat
                 if (WorkFolder.Current == null) return;
                 if (!_workHeaderShown) { w.WriteLine($"  Work dir:   {WorkFolder.Current}"); _workHeaderShown = true; }
                 for (; _workLinesShown < _workLines.Count; _workLinesShown++) w.WriteLine("  " + _workLines[_workLinesShown]);
+                // The names that moved. Under --audit the console lists them, and when the --audit tee is on, that IS truedat.log.
+                // Otherwise they are added to truedat.log in the work folder directly, so a file that moved can always be found.
+                foreach (var (dir, names) in _workNames)
+                {
+                    if (_workAudit) foreach (var l in names) w.WriteLine("  " + l);
+                    if (_tee != null) continue;
+                    try
+                    {
+                        var log = WorkFolder.Write(dir, "truedat.log");
+                        var stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+                        File.AppendAllLines(log, new[] { $"{stamp}  {names[0]}" }.Concat(names.Skip(1)));
+                    }
+                    catch (Exception ex) { w.WriteLine($"  Work folder: the moved names could not be written to truedat.log ({ex.Message})"); if (!_workAudit) foreach (var l in names) w.WriteLine("  " + l); }
+                }
+                _workNames.Clear();
             }
         }
 

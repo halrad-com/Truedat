@@ -324,6 +324,9 @@ namespace Truedat
             public List<string> Held = new List<string>();
             /// <summary>Names held in BOTH folders: the older copy was kept as <c>&lt;name&gt;.moved-&lt;time&gt;</c> beside the live one.</summary>
             public List<string> Renamed = new List<string>();
+            /// <summary>Every name that moved, in the order it moved. Anything beside the catalog named <c>mbxmoods-*</c> is taken
+            /// for truedat's, a file a person made included, so the run writes these down (<see cref="MovedNames"/>).</summary>
+            public List<string> MovedNames = new List<string>();
             public bool Anything { get { return Moved > 0 || Held.Count > 0; } }
         }
 
@@ -380,13 +383,13 @@ namespace Truedat
                         if (incomingIsNewer)
                         {
                             File.Move(dest, aside);
-                            if (MoveOne(src, dest)) { report.Moved++; report.Renamed.Add(name); }
+                            if (MoveOne(src, dest)) { report.Moved++; report.Renamed.Add(name); report.MovedNames.Add(name + " (the older copy, already in the work folder, kept as " + Path.GetFileName(aside) + ")"); }
                             else { File.Move(aside, dest); report.Held.Add(name); }
                         }
-                        else if (MoveOne(src, aside)) { report.Moved++; report.Renamed.Add(name); }
+                        else if (MoveOne(src, aside)) { report.Moved++; report.Renamed.Add(name); report.MovedNames.Add(name + " (older than the copy in the work folder, kept as " + Path.GetFileName(aside) + ")"); }
                         else report.Held.Add(name);
                     }
-                    else if (MoveOne(src, dest)) report.Moved++;
+                    else if (MoveOne(src, dest)) { report.Moved++; report.MovedNames.Add(name); }
                     else report.Held.Add(name);
                 }
                 catch (Exception) { report.Held.Add(name); }
@@ -402,6 +405,16 @@ namespace Truedat
             if (r.Renamed.Count > 0) line += $"; {r.Renamed.Count:N0} name{(r.Renamed.Count == 1 ? " was" : "s were")} in both folders, the older copy kept as <name>{MovedSuffix}<time>";
             if (r.Held.Count > 0) line += $"; {r.Held.Count:N0} held by another program and left in the catalog folder, still read from there ({string.Join(", ", r.Held)})";
             return line;
+        }
+
+        /// <summary>The names that moved, one per line, under a heading that says where from and where to; empty when nothing moved.</summary>
+        internal static List<string> MovedNames(MoveReport r, string catalogDir)
+        {
+            var lines = new List<string>();
+            if (r.MovedNames.Count == 0) return lines;
+            lines.Add($"Work folder: moved from {catalogDir} into {r.Folder}:");
+            foreach (var n in r.MovedNames) lines.Add("    " + n);
+            return lines;
         }
 
         /// <summary>Nothing else has the file open: it can be moved.</summary>

@@ -47,6 +47,7 @@ namespace Truedat
                 Import(assert, Path.Combine(root, "import"));
                 Paths(assert, Path.Combine(root, "paths"));
                 Size(assert, Path.Combine(root, "size"));
+                Names(assert, Path.Combine(root, "names"));
                 Settings(assert);
             }
             catch (Exception ex) { assert(false, $"work folder: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -466,6 +467,44 @@ namespace Truedat
             var work = WorkFolder.For(lib);
             assert(after.Contains("beside the catalog") && after.Contains("in the work folder") && after.Contains(work),
                 "work size: once the work folder holds files each group names its folder");
+        }
+
+        /// <summary>The move line gives a count; the names go to truedat.log in the work folder, and to the console under
+        /// --audit. Anything beside the catalog named mbxmoods-* is taken for truedat's and moves, a file a person made
+        /// included, so nobody should have to hunt for one that moved.</summary>
+        static void Names(Action<bool, string> assert, string root)
+        {
+            (string Console, string Log, string Work) Run(string name, bool audit)
+            {
+                var lib = Path.Combine(root, name, "Library");
+                var exe = Path.Combine(lib, "truedat");
+                Directory.CreateDirectory(exe);
+                var catalog = Path.Combine(lib, "mbxmoods.json");
+                File.WriteAllText(catalog, "{}");
+                File.WriteAllText(Path.Combine(lib, "mbxmoods-errors.csv"), "e");
+                File.WriteAllText(Path.Combine(lib, "mbxmoods-my-notes.txt"), "a file a person made");
+                WorkFolder.Configure(null, exe);
+                WorkFolder.BeginOnFirstUse = null;
+                Program.ResetWorkForTest(audit);
+                Program.BeginWork(catalog);
+                var sw = new StringWriter();
+                Program.ShowWork(sw);
+                var log = Path.Combine(exe, "truedat.log");
+                return (sw.ToString(), File.Exists(log) ? File.ReadAllText(log) : "", exe);
+            }
+            try
+            {
+                var quiet = Run("quiet", audit: false);
+                assert(quiet.Log.Contains("mbxmoods-errors.csv") && quiet.Log.Contains("mbxmoods-my-notes.txt") && quiet.Log.Contains(quiet.Work),
+                    "work names: every moved name is written to truedat.log in the work folder, with the folder it went to");
+                assert(quiet.Console.Contains("moved 2 working files") && !quiet.Console.Contains("mbxmoods-my-notes.txt"),
+                    "work names: without --audit the console keeps the one count line");
+                var loud = Run("audit", audit: true);
+                assert(loud.Console.Contains("mbxmoods-errors.csv") && loud.Console.Contains("mbxmoods-my-notes.txt"),
+                    "work names: under --audit the console lists them too");
+                assert(loud.Log.Contains("mbxmoods-my-notes.txt"), "work names: and truedat.log still has them");
+            }
+            finally { Program.ResetWorkForTest(false); }
         }
 
         /// <summary>The flag and the config key are one spelling, and a reset may ride with it.</summary>
