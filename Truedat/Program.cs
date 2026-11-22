@@ -9373,13 +9373,22 @@ namespace Truedat
 
             var dir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
             var stem = Path.GetFileNameWithoutExtension(moodsPath);
-            // Receipts are working files: in the work folder, or beside the catalog when written by a build before the move.
-            var lookIn = WorkFolder.Folders(dir);
+            // Receipts live beside the catalog (review #16), where every host's shard writes them. A receipt an EV6.2 build moved into a
+            // work folder is still read — but the catalog folder's copy of a name wins, so an older moved one never shadows a fresh one.
+            var lookIn = new List<string> { dir };
+            foreach (var d in WorkFolder.Folders(dir)) if (!lookIn.Contains(d, StringComparer.OrdinalIgnoreCase)) lookIn.Add(d);
             string[] files;
             try
             {
-                if (!lookIn.Any(Directory.Exists)) files = new string[0];
-                else files = WorkFolder.Files(dir, $"{stem}-verify*.receipt.json").ToArray();
+                var found = new List<string>();
+                var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var d in lookIn)
+                {
+                    if (!Directory.Exists(d)) continue;
+                    foreach (var f in Directory.GetFiles(d, $"{stem}-verify*.receipt.json"))
+                        if (seenNames.Add(Path.GetFileName(f))) found.Add(f);
+                }
+                files = found.ToArray();
             }
             catch (Exception ex)
             {
@@ -10063,7 +10072,7 @@ namespace Truedat
             // Per-shard CSV: a completed shard must be durably done and must not be overwritten
             // by the next one. Host too, matching the scan's convention, so two machines sharding
             // the same library directory don't collide.
-            // A working file: the work folder (the receipt below rides beside it, and --verify-coverage reads both folders).
+            // A working file: the work folder. The receipt below does NOT ride beside it: it goes beside the catalog (review #16).
             var verifyCatDir = Path.GetDirectoryName(Path.GetFullPath(moodsPath)) ?? ".";
             var csvPath = WorkFolder.Write(verifyCatDir, chunkTotal > 0
                 ? InsertFilenameSuffix("mbxmoods-verify.csv", $"{SanitizeForFilename(Environment.MachineName)}.{chunkIndex}of{chunkTotal}")
@@ -10088,7 +10097,9 @@ namespace Truedat
             // It attests to the RUN (was this verify complete and sound?), not to the library —
             // audio integrity is what the CSV says. Written only on a run that was not cut short,
             // so a receipt existing is itself evidence the source stayed up throughout.
-            var receiptPath = Path.ChangeExtension(csvPath, ".receipt.json");
+            // Beside the CATALOG, not the CSV (review #16): the CSV is this host's working file, the receipt is what --verify-coverage on
+            // any host combines, and with one shared catalog and a truedat per host only the catalog folder is common to them all.
+            var receiptPath = Path.Combine(verifyCatDir, Path.GetFileName(Path.ChangeExtension(csvPath, ".receipt.json")));
             if (csvPath != "(not written)")
             {
                 try
@@ -26440,20 +26451,44 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             // Confirmed, and every check above passed: NOW the work folder is settled and the working files beside the catalog move
             // into it (review #9). The file set is taken again, since what moved is now under work/, and the archive goes to the folder
             // actually settled (the catalog folder after a fallback) under the name it was announced with.
+            // Only what the confirmation announced is archived and removed: a file that appeared while the prompt waited is left alone.
+            string Bare(string entry) => entry.StartsWith("work/", StringComparison.Ordinal) ? entry.Substring(5) : entry;
+            var announced = new HashSet<string>(files.Select(f => Bare(f.EntryName)), StringComparer.OrdinalIgnoreCase);
             BeginWork(moodsPath);
             ShowWork(Console.Out);
-            files = ResetCommand.Collect(verb, moodsPath, store, ledgerPath);
+            List<(string Path, string EntryName)> Announced() =>
+                ResetCommand.Collect(verb, moodsPath, store, ledgerPath).Where(f => announced.Contains(Bare(f.EntryName))).ToList();
+            files = Announced();
             archive = ResetCommand.ArchivePathFor(verb, moodsPath, archiveTime);
 
             // The store's main file must be the whole store before it is archived: --restore takes that file out of the zip,
             // so changes still in the write-ahead log (a scan that was killed) would be archived and yet not restored.
             if (store != null && ResetCommand.FoldStoreLog(store))
-                files = ResetCommand.Collect(verb, moodsPath, store, ledgerPath);   // the log files are gone now
+                files = Announced();   // the log files are gone now
 
             // 8. Archive, then remove. A large store and catalog take minutes to compress, and a silent verb looks hung.
+            //    --clear reads the ignore decisions it carries out of the archive AFTER it is read back and BEFORE anything is
+            //    removed (review #18): from the list that was archived, not the copy read before the prompt, and a failure to read
+            //    them stops the run with nothing removed.
             Console.WriteLine($"  Archiving {Mb(totalBytes)} (compressed and read back before anything is removed; a large library takes a few minutes) ...");
+            var archivedLedger = clear
+                ? files.FirstOrDefault(f => string.Equals(Path.GetFullPath(f.Path), Path.GetFullPath(ledgerPath), StringComparison.OrdinalIgnoreCase)).EntryName
+                : null;
             ResetCommand.Result result;
-            try { result = ResetCommand.Execute(files, archive, store != null ? Path.GetFileName(store) : null); }
+            try
+            {
+                result = ResetCommand.Execute(files, archive, store != null ? Path.GetFileName(store) : null, beforeRemove: () =>
+                {
+                    carried = ResetCommand.CarriedForClear(verb, carried, archive, archivedLedger, out var carriedErr);
+                    return carriedErr == null ? null
+                        : $"the review list was archived, and its ignore decisions could not be read back out of {archive} ({carriedErr})";
+                });
+            }
+            catch (ResetCommand.StoppedBeforeRemovalException ex)
+            {
+                Console.Error.WriteLine($"Error: {ex.Message}, so nothing was removed. The archive is kept: {archive}");
+                return 1;
+            }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Error: the archive could not be written ({ex.Message}), so nothing was removed.");
@@ -26467,21 +26502,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
                 Console.Error.WriteLine("  Remove them and run a scan; the archive already holds them.");
                 return 1;
             }
-            // 9. --clear: the ignore decisions go back, in a list of the same kind written by the writer every scan uses — taken from
-            //    the list that was ARCHIVED (review #18), not the copy read before the prompt: a decision the hub changed while the
-            //    prompt waited is the one carried, and the new list cannot disagree with the archive it came from.
-            if (clear)
-            {
-                var archivedLedger = files.FirstOrDefault(f => string.Equals(Path.GetFullPath(f.Path), Path.GetFullPath(ledgerPath), StringComparison.OrdinalIgnoreCase)).EntryName;
-                string? carriedErr = null;
-                carried = archivedLedger == null ? null : ResetCommand.CarriedFromArchive(verb, archive, archivedLedger, out carriedErr);
-                if (archivedLedger != null && carried == null && carriedErr != null)
-                {
-                    Console.Error.WriteLine($"Error: the review list was archived, and its ignore decisions could not be read back out of {archive} ({carriedErr}), so the scan did not start.");
-                    Console.Error.WriteLine($"  They are in the archive as {archivedLedger}; everything else is archived and removed.");
-                    return 1;
-                }
-            }
+            // 9. --clear: the ignore decisions (read out of the archive above) go back, in a list of the same kind written by the
+            //    writer every scan uses.
             if (carried != null)
             {
                 if (!SaveReviewLedger(carried, ledgerPath, out var saveErr))

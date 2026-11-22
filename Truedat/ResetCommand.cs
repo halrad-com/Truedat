@@ -282,7 +282,17 @@ namespace Truedat
         /// if any of that fails it throws and nothing has been removed. A damaged catalog is archived as it is — a reset may
         /// be the remedy for one. The store's files go first: with a store the catalog is derived from it, so a run cut
         /// short between the two leaves files that say less, never files that say more than what remains.</summary>
-        internal static Result Execute(IReadOnlyList<(string Path, string EntryName)> files, string archivePath, string? storeName = null)
+        /// <summary>A step that must succeed before anything is removed refused; the archive is written and kept, nothing was removed.</summary>
+        internal sealed class StoppedBeforeRemovalException : IOException
+        {
+            internal StoppedBeforeRemovalException(string message) : base(message) { }
+        }
+
+        /// <param name="beforeRemove">Runs after the archive is written and read back and BEFORE the first file is removed (review #18:
+        /// --clear reads the decisions it carries out of the archive here). A non-null return stops the run with
+        /// <see cref="StoppedBeforeRemovalException"/>: the archive is kept and nothing is removed.</param>
+        internal static Result Execute(IReadOnlyList<(string Path, string EntryName)> files, string archivePath, string? storeName = null,
+            Func<string?>? beforeRemove = null)
         {
             var result = new Result();
             // An archive that was being written when an earlier clear or reset was stopped: unfinished, never moved into
@@ -298,6 +308,8 @@ namespace Truedat
             foreach (var f in files) result.Bytes += new FileInfo(f.Path).Length;
             CatalogArchive.WriteZipBackup(files, archivePath, requireWholeDocuments: false);
             result.Archived = files.Count;
+            var stop = beforeRemove?.Invoke();
+            if (stop != null) throw new StoppedBeforeRemovalException(stop);
             string storeFile = storeName ?? global::Truedat.Store.StoreLocation.FileName;
             bool IsStoreFile(string entry) => entry.StartsWith("store/", StringComparison.Ordinal)
                 || entry.StartsWith(storeFile, StringComparison.OrdinalIgnoreCase);
@@ -336,6 +348,16 @@ namespace Truedat
         /// carried, and the new list can never disagree with the archive it came out of. <paramref name="entryName"/> is the
         /// ledger's name inside the archive (<c>review/&lt;name&gt;</c>, or the bare name beside the catalog). Null carried and null error
         /// when the archive holds no review list or it has no ignore decision; an error when the archived list cannot be read.</summary>
+        /// <summary>The one decision of review #18: what --clear carries, given the list it read before the prompt and the archive it
+        /// wrote. Always the ARCHIVED list's ignore decisions; <paramref name="readBeforePrompt"/> never contributes — a review list
+        /// that was not in the archive (gone during the prompt) carries nothing, whatever the earlier read held.</summary>
+        internal static ReviewLedger? CarriedForClear(Verb verb, ReviewLedger? readBeforePrompt, string archivePath, string? archivedEntry, out string? error)
+        {
+            error = null;
+            if (verb != Verb.Clear || string.IsNullOrEmpty(archivedEntry)) return null;
+            return CarriedFromArchive(verb, archivePath, archivedEntry!, out error);
+        }
+
         internal static ReviewLedger? CarriedFromArchive(Verb verb, string archivePath, string entryName, out string? error)
         {
             error = null;

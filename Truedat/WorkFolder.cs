@@ -448,11 +448,22 @@ namespace Truedat
             if (Starts(DuplicatesPrefix)) return true;
             // The field registry: a decision about what the catalog carries.
             if (Is("mbxmoods-schema.json")) return true;
+            // A verify shard's coverage receipt (review #16): small, named per host and shard, and read by --verify-coverage on ANY
+            // host — so it lives with the shared catalog, not in the writing host's own work folder.
+            if (IsVerifyReceipt(name, catalogName)) return true;
             // What truedat writes for the hub to render: the review ledger and the preview page. Normally in the hub's
             // review folder; beside the catalog they are still the hub's. A --chunk shard's ledger carries the host suffix
             // (mbxmoods-review.<host>.json) and --merge-moods folds it from beside the shard's catalog, so it stays too.
             if (Starts(Path.GetFileNameWithoutExtension(ReviewLedger.FileName) + ".") || Starts("mbxmoods-preview.")) return true;
             return false;
+        }
+
+        /// <summary><c>&lt;catalog stem&gt;-verify*.receipt.json</c> — a verify shard's coverage receipt.</summary>
+        internal static bool IsVerifyReceipt(string name, string catalogName)
+        {
+            var stem = Path.GetFileNameWithoutExtension(string.IsNullOrEmpty(catalogName) ? "mbxmoods.json" : catalogName);
+            return name.StartsWith(stem + "-verify", StringComparison.OrdinalIgnoreCase)
+                && name.EndsWith(".receipt.json", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary><c>&lt;catalog&gt;.N</c> — a numbered part of a split catalog, whatever the catalog is called.</summary>

@@ -55,6 +55,7 @@ namespace Truedat
                 ReadOnlyLater(assert, Path.Combine(root, "readonly"));
                 Owner(assert, Path.Combine(root, "owner"));
                 Locator(assert, Path.Combine(root, "locator"));
+                SharedReceipts(assert, Path.Combine(root, "receipts"));
                 Settings(assert);
             }
             catch (Exception ex) { assert(false, $"work folder: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -99,7 +100,7 @@ namespace Truedat
                 "mbxmoods.json.bak.20261121.010203-2.zip", "mbxmoods.json.imported.c9458a2dafbe6763.zip", "mbxmoods.json.retired.20261121.010203.zip",
                 "mbxmoods.json.damaged.20261121.010203.zip", "truedat.db.bak.v4.20261121-010203", "truedat.db.bak.roots.20261121-010203",
                 "truedat.db.bak.20261121.010203.db", "truedat.db.bak.remap.20261121-010203", "mbxmoods-verify.csv", "mbxmoods-verify.host7.1of2.csv",
-                "mbxmoods-verify.receipt.json", "mbxmoods-speech.csv", "mbxmoods-smfm.csv", "mbxmoods-smfm-missing.csv", "mbxmoods-formats.csv",
+                "mbxmoods-speech.csv", "mbxmoods-smfm.csv", "mbxmoods-smfm-missing.csv", "mbxmoods-formats.csv",
                 "mbxmoods-store-disagree.csv", "mbxmoods-snapshot-20261121.010203.zip", "mbxmoods-reset-20261121-010203.zip",
                 "mbxmoods-errors.csv.moved-20261121-010203",
             })
@@ -113,6 +114,8 @@ namespace Truedat
                 "mbxmoods-review.host7.json",
                 // A --chunk shard's catalog and sidecar: --merge-moods sources, never another run's working files.
                 "mbxmoods.host7.json", "mbxmoods.host7.mbxs",
+                // A verify shard's receipt (review #16): --verify-coverage on any host reads it beside the shared catalog.
+                "mbxmoods-verify.receipt.json", "mbxmoods-verify.host7.1of2.receipt.json",
                 // A write in progress belongs to the run writing it: a --restore's staged catalog, a save's temp file.
                 "mbxmoods.json.restore.tmp", "mbxmoods.json.tmp", "mbxmoods-errors.csv.tmp",
                 "mbxmoods-duplicates.json", "mbxmoods-duplicates.csv", "mbxmoods-duplicates.html", "mbxmoods-duplicates.manifest.json",
@@ -879,6 +882,48 @@ namespace Truedat
             bool read = File.Exists(recPath) && global::Truedat.Store.StoreResult.TryRead(recPath, out rec);
             assert(read && rec!.Verb == "store-export" && rec.WorkFolder == work,
                 $"work locator: a --store-export run's store-result.json carries workFolder (exit {export.Exit}, verb {(read ? rec!.Verb : "-")}, workFolder {(read ? rec!.WorkFolder ?? "absent" : "-")})");
+        }
+
+        /// <summary>Distributed verification (review #16): with one shared catalog and a truedat installed on each host, each shard's
+        /// receipt went to that host's own work folder, so --verify-coverage on any one host could not see the others' shards. The
+        /// receipts stay beside the catalog (small, named per host and shard). Two work folders stand in for two exe folders.</summary>
+        static void SharedReceipts(Action<bool, string> assert, string root)
+        {
+            var lib = Path.Combine(root, "Library");
+            var music = Path.Combine(root, "music");   // exists (the volume answers); the files do not (every entry reads MISSING)
+            var hostA = Path.Combine(root, "exeA-work");
+            var hostB = Path.Combine(root, "exeB-work");
+            Directory.CreateDirectory(lib); Directory.CreateDirectory(music);
+            var catalog = Path.Combine(lib, "mbxmoods.json");
+            var entries = new Dictionary<string, TrackEntry>(PathComparer.Instance);
+            for (int i = 0; i < 20; i++)
+                entries[Path.Combine(music, $"track{i:D2}.flac")] = new TrackEntry
+                {
+                    Features = new TrackFeatures { Artist = "A", Title = "t" + i, Bpm = 120 },
+                    LastModified = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc), AudioStreamSha256 = new string((char)('a' + i % 6), 64),
+                };
+            global::Truedat.Store.StoreSelfTest.WriteCatalog(catalog, entries);
+            (int Exit, string Output) Child(string args)
+            {
+                var start = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = typeof(Program).Assembly.Location, WorkingDirectory = lib, Arguments = args,
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
+                };
+                using var child = System.Diagnostics.Process.Start(start)!;
+                child.StandardInput.Close();
+                var so = child.StandardOutput.ReadToEndAsync(); var se = child.StandardError.ReadToEndAsync();
+                if (!child.WaitForExit(120000)) { try { child.Kill(); } catch { } }
+                return (child.HasExited ? child.ExitCode : -1, so.GetAwaiter().GetResult() + se.GetAwaiter().GetResult());
+            }
+            var a = Child("--no-config --no-store --verify --moods \"" + catalog + "\" --chunk 1/2 --work-dir \"" + hostA + "\"");
+            var b = Child("--no-config --no-store --verify --moods \"" + catalog + "\" --chunk 2/2 --work-dir \"" + hostB + "\"");
+            var beside = Directory.GetFiles(lib, "mbxmoods-verify*.receipt.json").Select(Path.GetFileName).ToList();
+            assert(beside.Count == 2 && beside.Any(n => n!.Contains("1of2")) && beside.Any(n => n!.Contains("2of2")),
+                $"work receipts #16: each shard's receipt is beside the shared catalog, whatever the host's work folder ({string.Join(", ", beside)}; exits {a.Exit}/{b.Exit})");
+            var cov = Child("--no-config --no-store --verify-coverage --moods \"" + catalog + "\" --work-dir \"" + hostB + "\"");
+            assert(cov.Output.Contains("COVERAGE COMPLETE"),
+                $"work receipts #16: --verify-coverage on the second host sees every host's completed shard (exit {cov.Exit})");
         }
 
         /// <summary>The flag and the config key are one spelling, and a reset may ride with it.</summary>

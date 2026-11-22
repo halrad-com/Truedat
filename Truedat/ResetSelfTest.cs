@@ -702,7 +702,7 @@ namespace Truedat
                 var zip = Path.Combine(root, "mbxmoods-clear-20261122-000000.zip");
                 CatalogArchive.WriteZipBackup(new[] { (atArchiveTime, "review/" + ReviewLedger.FileName) }, zip, requireWholeDocuments: false);
 
-                var carried = ResetCommand.CarriedFromArchive(ResetCommand.Verb.Clear, zip, "review/" + ReviewLedger.FileName, out var err);
+                var carried = ResetCommand.CarriedForClear(ResetCommand.Verb.Clear, readBeforePrompt, zip, "review/" + ReviewLedger.FileName, out var err);
                 assert(err == null && carried != null && carried.Count == 1 && carried.Find(@"D:\Music\X.flac")?.State == ReviewState.Ignore
                        && carried.Find(@"D:\Music\Y.flac") == null && readBeforePrompt.Find(@"D:\Music\Y.flac") != null,
                     $"clear-archived #18: the decisions carried are the archived list's (X), not the earlier read's (Y) ({carried?.Count ?? -1}, {err})");
@@ -715,6 +715,17 @@ namespace Truedat
                 CatalogArchive.WriteZipBackup(new[] { (bad, "review/" + ReviewLedger.FileName) }, badZip, requireWholeDocuments: false);
                 ResetCommand.CarriedFromArchive(ResetCommand.Verb.Clear, badZip, "review/" + ReviewLedger.FileName, out var badErr);
                 assert(badErr != null, "clear-archived #18: an archived list that cannot be read is an error, not an empty carry");
+                assert(ResetCommand.CarriedForClear(ResetCommand.Verb.Clear, readBeforePrompt, zip, null, out _) == null,
+                    "clear-archived #18: a review list that was not archived carries nothing, whatever the earlier read held");
+
+                // Read before anything is removed: a carry that cannot be read stops Execute with every file still in place.
+                var kept = Path.Combine(root, "kept.txt"); File.WriteAllText(kept, "still here");
+                var stopZip = Path.Combine(root, "mbxmoods-clear-20261122-000002.zip");
+                bool stopped = false;
+                try { ResetCommand.Execute(new[] { (kept, "kept.txt") }, stopZip, null, beforeRemove: () => "cannot read the carried list"); }
+                catch (ResetCommand.StoppedBeforeRemovalException) { stopped = true; }
+                assert(stopped && File.Exists(kept) && File.Exists(stopZip),
+                    "clear-archived #18: a failure reading the carried decisions stops the run before anything is removed, the archive kept");
             }
             catch (Exception ex) { assert(false, "clear-archived #18: threw " + ex.GetType().Name + ": " + ex.Message); }
             finally { try { Directory.Delete(root, true); } catch { } }
