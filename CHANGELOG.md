@@ -20,7 +20,7 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 | 120 GB, 30 workers | 72 GB | 45 hours |
 
 - Scan order is fitted to the library. Long tracks are taken first and spread out, so they do not all run at once or finish last. The rest is taken in library order.
-- Identical files are not scanned twice: the same audio at two paths is analyzed once. A track the same length as an earlier one waits for a second pass and reuses the earlier analysis when the audio is identical.
+- Identical files are not scanned twice: the same audio at two paths is analyzed once, in a library, list or folder scan. A copy met while its twin is being analyzed waits for that analysis and reuses it; each copy keeps its own title, artist and album.
 - .8 build of Essentia using PGO+LTO optimization average about 2% less extractor time.
 - The scan summary says how many tracks were held in memory, and how many reused an identical track's analysis.
 - The clutter is relocated to the location of the exe: truedat's working files (the error and skipped lists, scan summaries, logs, backups and archives) are written to the folder with the exe instead of the catalog folder. Files already beside the catalog are moved on the first scan. The catalog, sidecar, edges file, store and your rules stay where they are. `--work-dir` names another folder.
