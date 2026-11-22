@@ -112,8 +112,12 @@ namespace Truedat
             bool Is(string other) => string.Equals(name, other, StringComparison.OrdinalIgnoreCase);
             if (Starts("mbxmoods-snapshot-") || Starts(ArchivePrefix) || Starts(ClearArchivePrefix)) return true;
             if (Is("mbxmoods-schema.json") || IsRulesLock(name)) return true;
-            return verb == Verb.Clear && (IsOperatorFile(name) || Is(TruedatConfig.FileName));
+            // --clear keeps the config and the log (operator 2026-11-22: "clear should leave the log but reset is reset").
+            return verb == Verb.Clear && (IsOperatorFile(name) || Is(TruedatConfig.FileName) || Is(LogFileName));
         }
+
+        /// <summary>truedat's log (<c>--audit</c>): --clear keeps it, --reset takes it.</summary>
+        internal const string LogFileName = "truedat.log";
 
         /// <summary>The config file's name inside a reset archive. Put back beside the exe by --restore.</summary>
         internal const string ConfigEntryName = "config/" + TruedatConfig.FileName;

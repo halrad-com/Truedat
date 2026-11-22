@@ -358,7 +358,7 @@ namespace Truedat
                 (Program.MoodsFileName, T, T, "the catalog"), ("mbxmoods.json.1", T, T, "a catalog part"), ("mbxmoods.mbxs", T, T, "the sidecar"),
                 ("mbxedges.v1.json", T, T, "the edges file"), ("truedat.db", T, T, "the store"), ("truedat.db-wal", T, T, "the store's log"),
                 ("store-result.json", T, T, "a store-*.json record"), ("mbxmoods-errors.csv", T, T, "the error list"), ("mbxmoods-skipped.csv", T, T, "the skip list"),
-                ("mbxmoods-scan-2026-11-21-1.txt", T, T, "a scan summary"), ("truedat.log", T, T, "the log"),
+                ("mbxmoods-scan-2026-11-21-1.txt", T, T, "a scan summary"), ("truedat.log", K, T, "the log"),
                 ("mbxmoods.json.bak.20261121.010203.zip", T, T, "a catalog backup"), ("truedat.db.bak.v4.20261121-010203", T, T, "a store backup"),
                 (ReviewLedger.FileName, T, T, "the review ledger (clear carries its ignore decisions into a new one)"),
                 // the duplicate report files: both take them
@@ -552,8 +552,8 @@ namespace Truedat
                 assert(Names(resetFiles) == resetWant, "reset-collect: --reset takes everything truedat wrote AND the operator's own files" + (Names(resetFiles) == resetWant ? "" : $"\n      got  {Names(resetFiles)}\n      want {resetWant}"));
 
                 var files = ResetCommand.Collect(ResetCommand.Verb.Clear, catalog, Path.Combine(lib, "truedat.db"), ledgerPath);
-                var want = Want(ours.Concat(new[] { "review/" + ReviewLedger.FileName }));
-                assert(Names(files) == want, "clear-collect: --clear takes everything truedat wrote and keeps the operator's own files" + (Names(files) == want ? "" : $"\n      got  {Names(files)}\n      want {want}"));
+                var want = Want(ours.Where(n => n != "truedat.log").Concat(new[] { "review/" + ReviewLedger.FileName }));
+                assert(Names(files) == want, "clear-collect: --clear takes everything truedat wrote but the log, and keeps the operator's own files" + (Names(files) == want ? "" : $"\n      got  {Names(files)}\n      want {want}"));
                 assert(files.All(f => File.Exists(f.Path)), "reset-collect: every listed file is a file on disk");
 
                 // No store named: a store sitting at the default place is still this library's file.
@@ -623,8 +623,8 @@ namespace Truedat
                 }
                 assert(ResetCommand.Collect(ResetCommand.Verb.Clear, catalog, Path.Combine(lib, "truedat.db"), ledgerPath).Count == 0,
                     "reset-execute: a second look finds nothing left to clear (the archive itself is kept)");
-                assert(ResetCommand.Collect(ResetCommand.Verb.Reset, catalog, Path.Combine(lib, "truedat.db"), ledgerPath).Select(f => f.EntryName).OrderBy(s => s, StringComparer.Ordinal).SequenceEqual(operators.OrderBy(s => s, StringComparer.Ordinal)),
-                    "reset-execute: and what a reset would still take is exactly the operator's own files");
+                assert(ResetCommand.Collect(ResetCommand.Verb.Reset, catalog, Path.Combine(lib, "truedat.db"), ledgerPath).Select(f => f.EntryName).OrderBy(s => s, StringComparer.Ordinal).SequenceEqual(operators.Concat(new[] { "truedat.log" }).OrderBy(s => s, StringComparer.Ordinal)),
+                    "reset-execute: and what a reset would still take is exactly the operator's own files and the log --clear kept");
 
                 var when = new DateTime(2026, 1, 2, 3, 4, 5);
                 var clearName = Path.GetFileName(ResetCommand.ArchivePathFor(ResetCommand.Verb.Clear, catalog, when));

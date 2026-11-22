@@ -1659,6 +1659,11 @@ namespace Truedat
         static bool _resetRequested, _clearRequested, _resetConfirmed;
         /// <summary>--no-config (or --self-test) was given: the config file is not read, and --reset leaves it where it is.</summary>
         static bool _noConfigGiven;
+
+        /// <summary>Whether this run reads the config file. Not with --no-config (or --self-test), and not with --reset: a reset
+        /// takes the config file with everything else (operator 2026-11-22: "reset is reset"), so the scan that follows it runs
+        /// on the defaults, as every later run will. --clear keeps the config, and its scan uses it.</summary>
+        internal static bool ConfigApplies(bool noConfig, bool resetVerb) => !noConfig && !resetVerb;
         static string? _resetSummary;
         static bool StartOverRequested => _resetRequested || _clearRequested;
         static ResetCommand.Verb StartOverVerb => _clearRequested ? ResetCommand.Verb.Clear : ResetCommand.Verb.Reset;
@@ -2734,7 +2739,8 @@ namespace Truedat
             _noConfigGiven = noConfig;
             bool configVerb = args.Any(a => string.Equals(CanonicalFlag(a), "config", StringComparison.OrdinalIgnoreCase));
             if (configVerb) { RunConfigCommand(args); return; }
-            if (!noConfig)
+            bool resetVerb = args.Any(a => string.Equals(CanonicalFlag(a), ResetCommand.Flag, StringComparison.OrdinalIgnoreCase));
+            if (ConfigApplies(noConfig, resetVerb))
             {
                 var exeDir = AppDomain.CurrentDomain.BaseDirectory;
                 var cfg = TruedatConfig.Load(exeDir);

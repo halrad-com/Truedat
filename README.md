@@ -143,11 +143,12 @@ other it stops and changes nothing.
 
 | | `--clear` | `--reset` |
 |---|---|---|
-| The catalog and its parts, the sidecar, `mbxedges.v1.json`, the store, `store-*.json`, the error and skip lists, scan summaries, logs, catalog and store backups, the duplicate report files | archived, then removed | archived, then removed |
+| The catalog and its parts, the sidecar, `mbxedges.v1.json`, the store, `store-*.json`, the error and skip lists, scan summaries, catalog and store backups, the duplicate report files | archived, then removed | archived, then removed |
 | The review list | archived; your `ignore` decisions are carried into a new review list, unchanged | archived, then removed — `ignore` decisions included |
 | Your own files: `mbxmoods-exclude.json` (and its backups and playlist), `apply-result.json`, `mbxmoods-duplicates.verdicts.json` | **kept** | archived, then removed |
 | Earlier snapshots and clear or reset archives | kept | kept |
-| The config file (`truedat.config.json`, beside the exe) | kept | archived, then removed (not with `--no-config`) |
+| The config file (`truedat.config.json`, beside the exe) | kept | archived, then removed (not with `--no-config`); the scan after it runs on the default settings |
+| `truedat.log` | kept | archived, then removed |
 | The field registry | kept | kept |
 
 `--reset` used to keep the exclusion rules and the config file; it no longer does. Its confirmation says

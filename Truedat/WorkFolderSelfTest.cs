@@ -209,6 +209,11 @@ namespace Truedat
                    && File.ReadAllText(config) == "{\"store\":true}",
                 "config: with none there, the restore puts it back beside the exe, byte for byte");
             ResetCommand.ConfigDirForTest = null;
+
+            // The scan that follows a --reset runs without the config (it was just taken); --clear's scan uses it.
+            assert(!Program.ConfigApplies(noConfig: false, resetVerb: true) && Program.ConfigApplies(noConfig: false, resetVerb: false)
+                   && !Program.ConfigApplies(noConfig: true, resetVerb: false),
+                "config: a --reset run reads no config file, so its scan runs on the defaults; any other run reads it unless --no-config");
         }
 
         static void Table(Action<bool, string> assert)

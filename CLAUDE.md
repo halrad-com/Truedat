@@ -136,7 +136,9 @@ local tidy-up:
   nothing else — less `Keeps`. **Both keep** snapshots, every earlier clear or reset archive, the field registry and the
   exclusion file's lock. **`--reset` takes the config file** (`truedat.config.json` beside the exe, archived as
   `config/truedat.config.json`; operator 2026-11-22: "im not seeing a reset reset the truedat config") unless the run has
-  `--no-config`; `--restore` of a reset archive puts it back beside the exe and refuses while one is there.
+  `--no-config`, and a `--reset` run reads no config at all (`Program.ConfigApplies`), so the scan after it runs on the
+  defaults; `--restore` of a reset archive puts it back beside the exe and refuses while one is there. `--clear` also
+  keeps `truedat.log` (operator: "clear should leave the log but reset is reset").
   **`--clear` keeps the config file and the operator's own files** (`ResetCommand.IsOperatorFile`: `mbxmoods-exclude*` — the
   rules, their backups, the exclusion playlist — `apply-result.json` and `mbxmoods-duplicates.verdicts.json`) and
   carries the review list's `ignore` records into a fresh list, unchanged, written by the scan's own writer

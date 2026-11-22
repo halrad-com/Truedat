@@ -10,7 +10,8 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Changed
 
-- Revert log move.
+- Undo-Revert logs back to the catalog specific location.
+- --Reset will remove the Truedat config  'truedat.config.json' along with the catalog, store, lists, summaries and log.
 
 ## [0.5.5.4-EV6.2] — 2026-11-21
 
@@ -18,12 +19,12 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 - RAM use is fitted to the machine. A long track is held in memory during analysis as far as the free RAM allows, instead of stopping at a fixed 256 MB (about 12.7 minutes). The RAM is shared by the tracks being analyzed, and the first to ask gets the room. Examples:
 
-| Free RAM, workers | RAM shared | Longest track held in memory |
-|---|---|---|
-| 6 GB, 6 workers | 3.6 GB | 1.7 hours |
-| 13 GB, 10 workers | 7.8 GB | 4 hours |
-| 26 GB, 20 workers | 15.6 GB | 7.8 hours |
-| 120 GB, 30 workers | 72 GB | 45 hours |
+| Free RAM, workers  | RAM shared | Longest track held in memory |
+| ------------------ | ---------- | ---------------------------- |
+| 6 GB, 6 workers    | 3.6 GB     | 1.7 hours                    |
+| 13 GB, 10 workers  | 7.8 GB     | 4 hours                      |
+| 26 GB, 20 workers  | 15.6 GB    | 7.8 hours                    |
+| 120 GB, 30 workers | 72 GB      | 45 hours                     |
 
 - Scan order is fitted to the library. Long tracks are taken first and spread out, so they do not all run at once or finish last. The rest is taken in library order.
 - Identical files are not scanned twice: the same audio at two paths is analyzed once, in a library, list or folder scan. A copy met while its twin is being analyzed waits for that analysis and reuses it; each copy keeps its own title, artist and album.
@@ -69,11 +70,11 @@ release state: a version is a snapshot along the arc, never promoted to a bare
 
 ### Backup, restore, reset
 
-| Command | What it does |
-|---|---|
-| `--snapshot` | Backup: one zip of the catalog, the exclusion rules, and the store if there is one. Changes nothing. |
+| Command           | What it does                                                                                                |
+| ----------------- | ----------------------------------------------------------------------------------------------------------- |
+| `--snapshot`      | Backup: one zip of the catalog, the exclusion rules, and the store if there is one. Changes nothing.        |
 | `--restore <zip>` | Puts the catalog back from a snapshot, a backup or a reset archive. Add `--store` to restore the store too. |
-| `--reset` | Zips everything truedat wrote, removes it, and scans from nothing. Asks you to type `RESET`. |
+| `--reset`         | Zips everything truedat wrote, removes it, and scans from nothing. Asks you to type `RESET`.                |
 
 ## [0.5.5.4-EV2.3] — 2026-11-20
 
