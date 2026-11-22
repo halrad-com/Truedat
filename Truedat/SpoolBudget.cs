@@ -93,7 +93,9 @@ namespace Truedat
             long want = _total > 0 ? SpoolBytesFor(durationSec, pcmBytesPerSec) : 0;
             lock (_gate)
             {
-                long othersToCome = (long)Math.Max(0, _workers - _running - 1) * _typicalExtractorBytes;
+                // Sized on the larger of an ordinary track and this one: a list or folder scan knows no typical length, and the
+                // tracks running beside a long one are often long too (long tracks are taken first, side by side).
+                long othersToCome = (long)Math.Max(0, _workers - _running - 1) * Math.Max(_typicalExtractorBytes, ext);
                 long spool = want > 0 && _reserved + ext + want + othersToCome <= _total ? want : 0;
                 if (spool > 0) _held++; else if (want > 0) _refused++; else _unknown++;
                 _reserved += ext + spool;
