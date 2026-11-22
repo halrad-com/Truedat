@@ -135,12 +135,15 @@ namespace Truedat
                 File.WriteAllText(Path.Combine(root, "run-edges.log"), out2);
                 bool have2 = StoreResult.TryRead(Path.Combine(fresh, StoreResultFile.FileName), out var r2);
                 long stored = -1;
-                try { using (var db = SqliteDb.OpenReadOnly(Path.Combine(fresh, "truedat.db"))) stored = new StoreDal(db).Generation(); } catch { }
+                // The DAL is disposed before the connection: it caches its prepared statements, and a statement left open keeps
+                // SQLite from closing the file, so the folder could not be deleted afterwards.
+                try { using (var db = SqliteDb.OpenReadOnly(Path.Combine(fresh, "truedat.db"))) using (var dal = new StoreDal(db)) stored = dal.Generation(); } catch { }
                 Check(exit2 == 0 && have2 && r2.Export.Performed && r2.Store.Generation == stored && r2.Export.Generation == stored && stored > 0,
                     $"store-open-cli: after a list scan that folds edges the record's store generation is the store's (record {r2.Store.Generation?.ToString() ?? "null"}, published {r2.Export.Generation?.ToString() ?? "null"}, store {stored}, exit {exit2})");
             }
             catch (Exception ex) { keep = true; assert(false, "store-open-cli: the test itself failed: " + ex.Message + "  [fixture kept: " + root + "]"); }
             finally { Writable(store); if (!keep) { try { Directory.Delete(root, true); } catch { } } }
+            if (!keep) assert(!Directory.Exists(root), "store-open-cli: its folder is removed afterwards — nothing the test opened still holds a file in it");
         }
     }
 }

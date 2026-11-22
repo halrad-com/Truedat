@@ -17584,6 +17584,11 @@ setMode(mode);  // sync the pivot toggle UI + initial render
 
             Console.WriteLine("Truedat FFT self-test");
 
+            // Every self-test makes its fixtures under SelfTestTemp.Root. This run first removes what earlier runs left there (unless
+            // another truedat is running now — a self-test's fixtures are in the same folder); at the end it removes the folder if empty.
+            var selfTestTemp = SelfTestTemp.Begin();
+            SelfTestTempSelfTest.Run(Assert);
+
             // The in-process self-tests keep today's layout — working files beside the catalog they built — so they find them where
             // they look and write nothing under the build output. WorkFolderSelfTest turns this off for its own cases.
             WorkFolder.UseCatalogFolderForTest = true;
@@ -25057,8 +25062,8 @@ setMode(mode);  // sync the pivot toggle UI + initial render
             }
 
             // Every test deletes its own directory; the shared parent goes too once it is empty (a non-recursive delete: anything still
-            // in it is a leak to fix, not to hide).
-            try { Directory.Delete(Path.Combine(Path.GetTempPath(), ".truedat-selftest")); } catch { }
+            // in it is a leak to fix, not to hide — the next run removes it).
+            selfTestTemp.Dispose();
 
             Console.WriteLine(failures == 0
                 ? "All self-tests passed."
