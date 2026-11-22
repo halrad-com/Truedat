@@ -70,6 +70,21 @@ local tidy-up:
   `listed`; a count not known yet is null. The field names are the hub's. Every site in the list scan that decides a
   listed path's fate tells `StoreResult.List` — a new skip or failure site that does not will show up as `notExamined`.
   Not written: a run with no catalog target (nowhere a reader would look), and a `--chunk` shard with no store.
+  Every record also carries top-level `workFolder` (2026-11-21, additive, no version change): the absolute path of the
+  work folder the run settled — the catalog folder after a fallback — written by every record from the moment the folder
+  is settled, and **absent** (not empty, not null) before that. The hub's utility reads it to list truedat's working
+  files; it must never re-derive the rule.
+- **The hub's files never leave the catalog folder; truedat's working files do** (2026-11-21, `WorkFolder`). The
+  catalog and its parts, the sidecar, `mbxedges.v1.json`, the store with `-wal`/`-shm`, every `store-*.json`, the
+  operator's rules (`mbxmoods-exclude.json` and its children, `apply-result.json`), the `mbxmoods-duplicate*` family and
+  the review files stay exactly where they were. Everything else `ClassifySideFile` counts — the ledgers, scan
+  summaries, logs, catalog and store backups, snapshots, reset archives, list reports — goes to the work folder: the
+  exe's folder when it is the catalog folder or a direct child of it, else `<exe>\libraries\<StoreLocation.LibraryId>`,
+  or `--work-dir` / config `work-dir`. `WorkFolder.IsWorkingFile` is the one definition of which files move;
+  `WorkFolder.Resolve` the one rule for where. A writing run moves what an earlier build left beside the catalog before
+  it reads any of it (never writing over a file — the older copy is kept as `.moved-<time>`); a reading run moves
+  nothing, creates nothing, and reads the work folder first and the catalog folder second. Moving a file the hub opens
+  by location, or making the hub derive the folder, is a cross-repo change.
 - **`--preview` emits both `preview.json` and the page**, and `preview.json` **is** the review
   manifest the hub serves (its filename stem is the route id). The hub's asset route serves
   only `.html` and no route serves an arbitrary sibling JSON, which is why the plan payload
@@ -113,9 +128,10 @@ local tidy-up:
   on our correction. Do not implement one to satisfy a doc — `--force-clean` acts on ground truth
   (the volume is unreachable *and* the operator asserted it), not on a classification.
 - **`--reset` is not a third way to lose an entry on a classification — it is the operator starting over** (2026-11-20).
-  It archives every file truedat wrote for the library into `mbxmoods-reset-<time>.zip` beside the catalog, removes
-  them, and runs the library scan from nothing. The file set is whatever the scan summary's size block counts
-  (`ClassifySideFile`, one definition of "ours") less `ResetCommand.IsKept` — the exclusion rules, the field registry,
+  It archives every file truedat wrote for the library into `mbxmoods-reset-<time>.zip` in the work folder, removes
+  them, and runs the library scan from nothing. The file set is whatever the scan summary's size block counts — beside
+  the catalog, everything `ClassifySideFile` (one definition of "ours") names; in the work folder, what
+  `WorkFolder.IsWorkingFile` names, under `work/` in the archive — less `ResetCommand.IsKept` — the exclusion rules, the field registry,
   snapshots and earlier reset archives stay, and so does the config file. In the hub's review folder it takes
   `mbxmoods-review.json` and nothing else. Nothing is removed until the archive has been written and read back; a file
   another program holds stops it before the archive is written (so it refuses while the hub holds the store); and it

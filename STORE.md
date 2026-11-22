@@ -11,7 +11,7 @@ behaves, and nothing is installed: truedat uses the SQLite that ships with Windo
 
 **Store only.** `truedat --config publish false` (or `--no-publish` for one run) makes the store the
 only output: no `mbxmoods.json`, sidecar or `mbxedges.v1.json` is written beside it. Files already
-there are kept once in `mbxmoods.json.retired.<time>.zip` and removed. Edges still go into the store,
+there are kept once in `mbxmoods.json.retired.<time>.zip` (in the work folder — see README, *Where the files go*) and removed. Edges still go into the store,
 and `--store-export` / `--edges-export` still write files when asked. `--publish` turns publishing back
 on for one run. Use it only with a hub that reads the store; a hub that reads the files sees nothing.
 
@@ -66,7 +66,7 @@ forward on first open by a newer build (backup first), and an older build refuse
 
 **The chroma marker (schema v5, 2026-11-21).** `track_content.chromaFold` says how a track's `hpcp12` / `thpcp12` were
 grouped (the catalog's `chromaFold`); NULL means the track was described before the marker existed. A store at v4 gains the
-column when it is opened, after a backup beside it (`truedat.db.bak.v4.<time>`). The marker is never taken from a different
+column when it is opened, after a backup (`truedat.db.bak.v4.<time>`; see *Backups of the store* below). The marker is never taken from a different
 source than the chroma it describes: an arrival that carries chroma keeps its own marker, a missing one included.
 
 **Edges and verdicts (schema v4, 2026-10-16).** The edge is a typed `edge` row per edge. By default it holds
@@ -98,11 +98,20 @@ first open by a v3 build — backup first (`truedat.db.bak.v2.<stamp>`, via `VAC
 free-space check), every value preserved exactly; a v2 value the typed column could not hold exactly
 makes the migration refuse and roll back, naming the column, rather than round it.
 
+**Backups of the store.** Every copy the store makes of itself before a change — a migration's
+`truedat.db.bak.v<N>.<stamp>`, an open-time repair's `.bak.roots.<stamp>`, a remap's `.bak.remap.<stamp>`,
+a restore's `truedat.db.bak.<ts>.db` — is a working file. A store beside the catalog writes them to the
+library's work folder, with the rest of truedat's working files; a store kept in a folder of its own
+(`--store-dir`, a network library's local store, a `--store` path outside the catalog folder) keeps
+them beside itself, as before.
+`--keep-backups` rotation counts the ones in both places. The store itself, its `-wal` / `-shm` and the
+`store-*.json` records never move.
+
 ## Verbs
 
 | Verb | Does |
 |---|---|
-| `--store-import` with `--moods <catalog>` | loads the catalog and the ledgers beside it (errors, skipped, review, verify, receipts), idempotently, in batches; `--library-root <path>`, `--root-role primary|mirror|endpoint`, `--machine-adopt` |
+| `--store-import` with `--moods <catalog>` | loads the catalog and its ledgers (the errors, skipped and verify lists and receipts from the work folder — or beside the catalog, from a build before the move — and the review ledger), idempotently, in batches; a ledger that has moved between the two is not imported twice; `--library-root <path>`, `--root-role primary|mirror|endpoint`, `--machine-adopt` |
 | a scan, with a store in force | commits every entry it touched — analysed ones as producer `essentia@<build>` with one run row each, cache hits as copy facts — at each checkpoint and at the end, then publishes the catalog, sidecar and companion from the store; failures become failed runs. A stop (second Ctrl+C, console closed, logoff, shutdown) commits and publishes what has completed before the process ends |
 | `--store-export <out.json>` (`--export-root <root>`) | a catalog from the store through the unchanged writer — the same bytes a scan would write; `key-moves.json` beside it when a content hash was superseded |
 | `--store-roundtrip <catalog>` | per-entry byte equality of store against catalog, both through the catalog writer; exit 1 on any difference; `--audit` prints where the first difference is |
@@ -164,7 +173,7 @@ are different acts, and only the second one is a backup of the thing the files c
 - **`--restore <archive>` with a store in force** restores the store when the archive carries one. It
   refuses *before* replacing anything if the extracted store does not open, fails
   `PRAGMA quick_check`, or comes from a newer schema than this build reads. The store being replaced
-  is itself snapshotted first (`truedat.db.bak.<ts>.db`, rotated by `--keep-backups`), so undoing a
+  is itself snapshotted first (`truedat.db.bak.<ts>.db`, rotated by `--keep-backups`; see *Backups of the store*), so undoing a
   restore is the same command. The replaced store's stale WAL pair is removed with it.
 - **The generation advances on a restore.** A restore is a consumer-visible mutation even when the
   restored bytes are older than what the hub cached, so the catalog, sidecar and companion are
