@@ -107,7 +107,7 @@ namespace Truedat
             var dir = For(cat);
             if (Same(dir, cat)) return Same(Resolve(cat), cat) ? "the catalog folder" : "the catalog folder: the work folder could not be written";
             if (_option != null) return "--work-dir";
-            return dir.StartsWith(Norm(_exeDir) + Path.DirectorySeparatorChar + LibrariesDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            return dir.StartsWith(Path.Combine(Norm(_exeDir), LibrariesDir) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
                 ? $"under the exe, library id {(global::Truedat.Store.StoreLocation.LibraryId(cat))}"
                 : "the exe's folder (truedat is installed in the library)";
         }
@@ -497,11 +497,24 @@ namespace Truedat
             return true;
         }
 
+        /// <summary>A folder's full path without a trailing separator — except a drive root, which keeps its own (review #6): "C:" is
+        /// not the root of C but the current directory OF drive C, so a trimmed root sent the move and every path built on it into
+        /// whatever folder the process happened to stand in.</summary>
         static string Norm(string path)
         {
             if (string.IsNullOrEmpty(path)) path = ".";   // GetDirectoryName of a bare relative name: the current directory
-            try { return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar); }
-            catch { return (path ?? "").TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar); }
+            var seps = new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar };
+            string full;
+            try { full = Path.GetFullPath(path); }
+            catch { return (path ?? "").TrimEnd(seps); }
+            var trimmed = full.TrimEnd(seps);
+            string? root = null;
+            try { root = Path.GetPathRoot(full); } catch { }
+            // "C:\" would trim to "C:": keep the root. A UNC root ("\\server\share") carries no trailing separator and is whole as it is.
+            if (!string.IsNullOrEmpty(root) && root!.Length > 0 && Array.IndexOf(seps, root[root.Length - 1]) >= 0
+                && string.Equals(trimmed, root.TrimEnd(seps), StringComparison.OrdinalIgnoreCase))
+                return root;
+            return trimmed;
         }
 
         static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);

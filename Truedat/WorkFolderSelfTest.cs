@@ -48,6 +48,7 @@ namespace Truedat
                 Paths(assert, Path.Combine(root, "paths"));
                 Size(assert, Path.Combine(root, "size"));
                 Names(assert, Path.Combine(root, "names"));
+                DriveRoots(assert, Path.Combine(root, "roots"));
                 Settings(assert);
             }
             catch (Exception ex) { assert(false, $"work folder: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -507,6 +508,45 @@ namespace Truedat
                 assert(loud.Log.Contains("mbxmoods-my-notes.txt"), "work names: and truedat.log still has them");
             }
             finally { Program.ResetWorkForTest(false); }
+        }
+
+        /// <summary>A catalog folder or a work folder at a drive root stays the root (review #6). Trimming the separator off "C:\" left
+        /// "C:", which Windows reads as the current directory OF drive C — so with the current directory anywhere but the root, the
+        /// move enumerated and wrote in the wrong folder. Paths only: nothing here is written at a drive root.</summary>
+        static void DriveRoots(Action<bool, string> assert, string root)
+        {
+            Directory.CreateDirectory(root);
+            var saved = Environment.CurrentDirectory;
+            var driveRoot = Path.GetPathRoot(Path.GetFullPath(root))!;   // the drive the fixture is on, e.g. C:\
+            try
+            {
+                Environment.CurrentDirectory = root;                      // not the root of that drive
+                var exe = Path.Combine(root, "Tools", "truedat");
+                WorkFolder.Configure(null, exe);
+                WorkFolder.BeginOnFirstUse = null;
+                string Where(string p) => Path.GetFullPath(p);
+
+                var resolved = WorkFolder.Resolve(driveRoot, driveRoot, exe);
+                assert(resolved == driveRoot, $"work roots: a work folder at a drive root is that root ({resolved}, want {driveRoot})");
+                assert(Where(Path.Combine(resolved, "mbxmoods-errors.csv")) == Path.Combine(driveRoot, "mbxmoods-errors.csv"),
+                    $"work roots: a file in it is at the root, not in the current directory ({Where(Path.Combine(resolved, "mbxmoods-errors.csv"))})");
+
+                var underExe = WorkFolder.Resolve(driveRoot, null, exe);
+                assert(underExe == Path.Combine(exe, "libraries", global::Truedat.Store.StoreLocation.LibraryId(driveRoot)),
+                    $"work roots: a catalog at a drive root gets its own folder under the exe ({underExe})");
+                var forRoot = WorkFolder.For(driveRoot);
+                var other = WorkFolder.OtherPlace(driveRoot, Path.Combine(forRoot, "mbxmoods-errors.csv"));
+                assert(other != null && Where(other) == Path.Combine(driveRoot, "mbxmoods-errors.csv"),
+                    $"work roots: the catalog-folder side of a root catalog is the root ({other})");
+                var folders = WorkFolder.Folders(driveRoot);
+                assert(folders.Count == 2 && Where(Path.Combine(folders[1], "x")) == Path.Combine(driveRoot, "x"),
+                    $"work roots: the folders a root catalog's files can be in end with the root itself ({string.Join(" | ", folders)})");
+
+                WorkFolder.Configure(driveRoot, exe);
+                var asOption = WorkFolder.For(Path.Combine(root, "Library"));
+                assert(Where(Path.Combine(asOption, "x")) == Path.Combine(driveRoot, "x"), $"work roots: --work-dir naming a drive root is that root ({asOption})");
+            }
+            finally { Environment.CurrentDirectory = saved; WorkFolder.Configure(null, AppDomain.CurrentDomain.BaseDirectory); }
         }
 
         /// <summary>The flag and the config key are one spelling, and a reset may ride with it.</summary>
