@@ -244,6 +244,10 @@ namespace Truedat.Store
             string fullStore;
             try { fullStore = Path.GetFullPath(storePath); } catch { fullStore = storePath; }
             if (_scan != null && string.Equals(_scanStore, fullStore, StringComparison.OrdinalIgnoreCase)) return;
+            // The scan began its record before it knew its library (the first guess at the store's place is the folder truedat was
+            // started in) and has now settled somewhere else. The record at the guess is this scan's own provisional one; left
+            // there it would say "interrupted" for good, in a folder no later run of this library writes to.
+            if (_scan != null && _scanStore != null) RemoveOwnProvisional(PathFor(_scanStore), _scan.StartedUtc);
             ResetScanForTest();
             _scanStore = fullStore;
             _scan = Begin("scan");
@@ -251,6 +255,20 @@ namespace Truedat.Store
             _scan.Store = new StoreResultStore { Path = fullStore, TruedatVersion = VersionInfo.Display };
             _scan.Export = new StoreResultExport { Performed = false };
             Write(fullStore, _scan, null, OutcomeInterrupted, ProvisionalReason);
+        }
+
+        /// <summary>Removes the record at <paramref name="recordPath"/> only when it is still the provisional record this scan wrote
+        /// there: same start, still "has not reported its outcome yet". A record any run finished is never removed here.</summary>
+        static void RemoveOwnProvisional(string recordPath, string? startedUtc)
+        {
+            try
+            {
+                if (!TryRead(recordPath, out var r)) return;
+                if (r.Verb != "scan" || r.Outcome != OutcomeInterrupted || r.Reason != ProvisionalReason || r.StartedUtc != startedUtc) return;
+                File.Delete(recordPath);
+                StoreLog.Debug($"removed the provisional run record at {recordPath}: the scan settled on a store elsewhere");
+            }
+            catch (Exception ex) { StoreLog.Debug($"could not remove the provisional run record at {recordPath}: {ex.Message}"); }
         }
 
         /// <summary>The scan decided something about its own outcome (source lost → interrupted; Ctrl+C → interrupted;

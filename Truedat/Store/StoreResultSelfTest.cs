@@ -27,6 +27,10 @@ namespace Truedat.Store
             try { TestScanRecord(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Scan: threw {ex.GetType().Name}: {ex.Message}"); }
             finally { StoreResult.ResetScanForTest(); }
+            Console.WriteLine("Store-result self-test (a scan whose store location changes after it began leaves no record at the first place)");
+            try { TestRecordFollowsTheStore(assert); }
+            catch (Exception ex) { assert(false, $"StoreResult.Follows: threw {ex.GetType().Name}: {ex.Message}"); }
+            finally { StoreResult.ResetScanForTest(); }
             Console.WriteLine("Store-result self-test (codex rescan R7: a stopped scan seals its record — exit code, committed generation, the last publication — before the process ends)");
             try { TestFinishStoppedScan(assert); }
             catch (Exception ex) { assert(false, $"StoreResult.Stopped: threw {ex.GetType().Name}: {ex.Message}"); }
@@ -342,6 +346,33 @@ namespace Truedat.Store
                 var n2 = new StoreResultFile(); bool n2Ok = path2 != null && StoreResult.TryRead(path2!, out n2);
                 assert(n2Ok && n2.Outcome == "interrupted" && n2.ExitCode == null && File.ReadAllText(path2!).Contains("\"exitCode\": null"),
                     $"R7: a native close seals interrupted with exitCode null — never an invented 130 ({n2.Outcome}/{n2.ExitCode})");
+            }
+        }
+
+        /// <summary>A scan begins its record before it knows its library: with no catalog named, the first guess at the store's
+        /// place is the folder truedat was started in. Once the library is found the record belongs beside its store, and the
+        /// one written at the guess — still saying "interrupted, has not reported its outcome yet" — must not be left behind for
+        /// every later reader of that folder to find.</summary>
+        static void TestRecordFollowsTheStore(Action<bool, string> assert)
+        {
+            const string started = "2026-11-21T00:00:00.0000000Z";
+            using (var guess = new Dir())
+            using (var real = new Dir())
+            {
+                StoreResult.ResetScanForTest();
+                var first = StoreResult.PathFor(guess.P("truedat.db"));
+                StoreResult.BeginScan(guess.P("truedat.db"), started);
+                assert(File.Exists(first), "record follows the store: the scan begins a record at its first guess");
+                StoreResult.BeginScan(real.P("truedat.db"), started);
+                assert(File.Exists(StoreResult.PathFor(real.P("truedat.db"))), "record follows the store: the record is begun beside the store the scan settled on");
+                assert(!File.Exists(first), "record follows the store: the provisional record at the first guess is removed, not left saying interrupted");
+
+                // Only its own provisional record: one another run finished at that place is not this scan's to remove.
+                StoreResult.ResetScanForTest();
+                StoreResult.BeginScan(guess.P("truedat.db"), started);
+                File.WriteAllText(first, "{\"kind\":\"store-result\",\"schemaVersion\":1,\"verb\":\"scan\",\"outcome\":\"completed\",\"exitCode\":0,\"startedUtc\":\"2026-01-01T00:00:00.0000000Z\"}");
+                StoreResult.BeginScan(real.P("truedat.db"), started);
+                assert(File.Exists(first), "record follows the store: a record that is not this scan's provisional one is left alone");
             }
         }
 
