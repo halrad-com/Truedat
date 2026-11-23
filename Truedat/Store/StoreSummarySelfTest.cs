@@ -425,13 +425,13 @@ namespace Truedat.Store
             assert(StoreSummaryCommand.Sig(0.2) == "+0.2" && StoreSummaryCommand.Sig(-0.2) == "-0.2",
                    $"Range: any other sigma carries its sign (got {StoreSummaryCommand.Sig(0.2)}, {StoreSummaryCommand.Sig(-0.2)})");
 
-            // A feature the model has no fitted range for still has raw statistics worth pooling; it has no sigmas.
+            // A feature the model takes as measured still has raw statistics worth pooling; it has no sigmas.
             assert(raw.Select(Cells).Any(c => c.Length == 7 && c[0] == "spectralFlatness" && c[1] == "2"),
                    "Range: a feature with no usable fitted scale still gets its raw row");
             assert(!sig.Select(Cells).Any(c => c.Length > 0 && c[0] == "spectralFlatness" && c.Length == 6),
                    "Range: and no sigma row");
-            assert(o.Any(l => l.Contains("no fitted range to compare against")) && string.Join(" ", o).Contains("spectralFlatness"),
-                   "Range: the output says which feature has no fitted range");
+            assert(o.Any(l => l.Contains("taken by the model 1:1, as measured")) && string.Join(" ", o).Contains("spectralFlatness"),
+                   "Range: the output says which feature the model takes as measured");
             assert(o.Any(l => l.Contains("no value stored in this library: hfc")),
                    "Range: a feature with no stored value is named, not printed as a row of zeros");
             assert(StoreSummaryCommand.ValenceInputBound == 4.0, "Range: the bound is the model's own input bound (4 sigma)");
@@ -778,9 +778,9 @@ namespace Truedat.Store
                 assert(known, $"Model scale: '{f.Name}' is a field FieldPrecision knows (the store holds it scaled)");
             }
 
-            // The degenerate-scale guard: it must catch mean 0 / std 1 and nothing else.
+            // The 1:1 guard: it must catch mean 0 / std 1 (the model takes the value as measured) and nothing else.
             assert(!StoreSummaryCommand.HasUsableScale(new StoreSummaryCommand.Feat("x", 0.0, 1.0)),
-                   "Model scale: mean 0 / std 1 is no reference to compare against");
+                   "Model scale: mean 0 / std 1 is taken 1:1, no sigma");
             assert(!StoreSummaryCommand.HasUsableScale(new StoreSummaryCommand.Feat("x", 5.0, 0.0)),
                    "Model scale: a zero standard deviation is no reference either");
             assert(StoreSummaryCommand.HasUsableScale(new StoreSummaryCommand.Feat("x", 0.0, 2.0)),
@@ -788,12 +788,12 @@ namespace Truedat.Store
             assert(StoreSummaryCommand.HasUsableScale(new StoreSummaryCommand.Feat("x", 124.4, 25.07)),
                    "Model scale: an ordinary fitted scale is usable");
 
-            // The one feature the shipped model cannot be compared on, named so the output can say why.
+            // The one feature the shipped model takes as measured, named so the output can say so.
             var flat = scale.Single(f => f.Name == "spectralFlatness");
             assert(!StoreSummaryCommand.HasUsableScale(flat),
-                   "Model scale: spectralFlatness is excluded — the shipped model's scale for it is mean 0 / std 1");
+                   "Model scale: spectralFlatness is taken as measured — the shipped model's scale for it is mean 0 / std 1");
             assert(scale.Count(f => !StoreSummaryCommand.HasUsableScale(f)) == 1,
-                   "Model scale: spectralFlatness is the ONLY feature without a usable fitted scale");
+                   "Model scale: spectralFlatness is the ONLY feature taken as measured");
         }
     }
 }

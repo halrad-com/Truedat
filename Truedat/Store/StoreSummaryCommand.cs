@@ -92,9 +92,9 @@ namespace Truedat.Store
             new Feat("dynamicRange", 6.653648415712528, 3.903491636708428),
         };
 
-        /// <summary>A feature whose fitted scale is degenerate carries no reference to compare against: with mean 0 and
-        /// std 1 the "sigma" of a library's value is just the value. Named so the output can say which and why rather
-        /// than print a column of nonsense. (spectralFlatness, mood-model v3 — reported to the hub lane 2026-11-10.)</summary>
+        /// <summary>A feature the model takes as measured, with no scale fitted (mean 0, std 1 in the model file): there
+        /// is no fitted mean to measure a distance from, so it gets a raw row and no sigma row. Nothing is missing —
+        /// flatness is its own measure. (spectralFlatness in mood-model v3.)</summary>
         internal static bool HasUsableScale(Feat f) => f.Std > 0 && !(f.Mean == 0.0 && f.Std == 1.0);
 
         /// <summary>Where the same model's valence side stops reading an input: each standardized input is clipped to
@@ -589,7 +589,7 @@ namespace Truedat.Store
         ///
         /// <para>The first is the library's own raw statistics. n, mean and std are there so several libraries'
         /// blocks can be POOLED into one scale without anyone's tracks: a combined mean and standard deviation follow
-        /// exactly from each block's three numbers. That is also why a feature the model has no fitted range for
+        /// exactly from each block's three numbers. That is also why a feature the model takes 1:1, as measured,
         /// still gets its row here.</para>
         ///
         /// <para>The second is the same library in the model's fitted sigmas, at both ends. A median can sit inside
@@ -634,7 +634,7 @@ namespace Truedat.Store
                 // to 160 characters, and this is state a reader needs, so it cannot just be dropped either.
                 Note(o, "no value stored in this library: " + string.Join(", ", absent));
             if (noScale.Count > 0)
-                Note(o, "no fitted range to compare against, the model's scale for it being mean 0 / std 1: " + string.Join(", ", noScale));
+                Note(o, "taken by the model 1:1, as measured, so no sigma row: " + string.Join(", ", noScale));
             Explain(o, "Sigma is distance from the fitted mean in fitted standard deviations. A p5 or p95 past about 2 " +
                     "sigma means that end of this library sits outside most of what the model was trained on. This " +
                     "model's valence side stops reading an input at 4 sigma, so a track past it is scored as if it " +
